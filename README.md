@@ -27,13 +27,21 @@ speed of [libsodium][].
 [libsodium]: https://libsodium.org
 [TweetNaCl]: https://tweetnacl.cr.yp.to/
 
+License (this fork)
+-------------------
+
+This fork is distributed under GPL-2.0-or-later. See `LICENSE` and
+`NOTICE.md`. Upstream Monocypher sources remain BSD-2-Clause OR CC0-1.0
+as described in `LICENCE.md`.
+
 
 Features
 --------
 
 - [Authenticated Encryption][AEAD] with XChaCha20 and Poly1305
   (RFC 8439).
-- [Hashing and key derivation][HASH] with BLAKE2b (and [SHA-512][]).
+- [Hashing and key derivation][HASH] with BLAKE2b, BLAKE3,
+  [SHA-512][], and SHA-256.
 - [Password Hashing][PWH] with Argon2.
 - [Public Key Cryptography][PKC] with X25519 key exchanges.
 - [Public Key Signatures][EDDSA] with EdDSA and [Ed25519][].

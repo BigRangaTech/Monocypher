@@ -1,3 +1,12 @@
+Unreleased
+-----
+2026/01/31
+
+- Added SHA-256 (hash, HMAC, HKDF) to core.
+- Added BLAKE3 (hash, keyed hash, derive-key mode) to core.
+- Relicensed fork under GPL-2.0-or-later (see LICENSE and NOTICE.md).
+
+
 4.0.2
 -----
 2023/08/24

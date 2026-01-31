@@ -52,6 +52,7 @@
 // <https://creativecommons.org/publicdomain/zero/1.0/>
 
 #include "monocypher.h"
+#include <limits.h>
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 namespace MONOCYPHER_CPP_NAMESPACE {
@@ -111,6 +112,14 @@ static u64 load64_le(const u8 s[8])
 	return load32_le(s) | ((u64)load32_le(s+4) << 32);
 }
 
+static u32 load32_be(const u8 s[4])
+{
+	return ((u32)s[0] << 24)
+		| ((u32)s[1] << 16)
+		| ((u32)s[2] <<  8)
+		| ((u32)s[3] <<  0);
+}
+
 static void store32_le(u8 out[4], u32 in)
 {
 	out[0] =  in        & 0xff;
@@ -119,10 +128,30 @@ static void store32_le(u8 out[4], u32 in)
 	out[3] = (in >> 24) & 0xff;
 }
 
+static void store32_be(u8 out[4], u32 in)
+{
+	out[0] = (in >> 24) & 0xff;
+	out[1] = (in >> 16) & 0xff;
+	out[2] = (in >>  8) & 0xff;
+	out[3] =  in        & 0xff;
+}
+
 static void store64_le(u8 out[8], u64 in)
 {
 	store32_le(out    , (u32)in );
 	store32_le(out + 4, in >> 32);
+}
+
+static void store64_be(u8 out[8], u64 in)
+{
+	out[0] = (in >> 56) & 0xff;
+	out[1] = (in >> 48) & 0xff;
+	out[2] = (in >> 40) & 0xff;
+	out[3] = (in >> 32) & 0xff;
+	out[4] = (in >> 24) & 0xff;
+	out[5] = (in >> 16) & 0xff;
+	out[6] = (in >>  8) & 0xff;
+	out[7] =  in        & 0xff;
 }
 
 static void load32_le_buf (u32 *dst, const u8 *src, size_t size) {
@@ -137,9 +166,53 @@ static void store32_le_buf(u8 *dst, const u32 *src, size_t size) {
 static void store64_le_buf(u8 *dst, const u64 *src, size_t size) {
 	FOR(i, 0, size) { store64_le(dst + i*8, src[i]); }
 }
+static void load32_be_buf (u32 *dst, const u8 *src, size_t size) {
+	FOR(i, 0, size) { dst[i] = load32_be(src + i*4); }
+}
+static void store32_be_buf(u8 *dst, const u32 *src, size_t size) {
+	FOR(i, 0, size) { store32_be(dst + i*4, src[i]); }
+}
 
 static u64 rotr64(u64 x, u64 n) { return (x >> n) ^ (x << (64 - n)); }
 static u32 rotl32(u32 x, u32 n) { return (x << n) ^ (x >> (32 - n)); }
+static u32 rotr32(u32 x, u32 n) { return (x >> n) ^ (x << (32 - n)); }
+
+static int check_ptr(const void *ptr, size_t size)
+{
+	return (size != 0 && ptr == 0) ? CRYPTO_ERR_NULL : CRYPTO_OK;
+}
+
+static int check_out_ptr(const void *ptr)
+{
+	return ptr == 0 ? CRYPTO_ERR_NULL : CRYPTO_OK;
+}
+
+static int checked_add_u64(u64 a, u64 b, u64 *out)
+{
+	if (a > UINT64_MAX - b) {
+		return CRYPTO_ERR_OVERFLOW;
+	}
+	*out = a + b;
+	return CRYPTO_OK;
+}
+
+static int checked_add_u32(u32 a, u32 b, u32 *out)
+{
+	if (a > UINT32_MAX - b) {
+		return CRYPTO_ERR_OVERFLOW;
+	}
+	*out = a + b;
+	return CRYPTO_OK;
+}
+
+static int checked_mul_size(size_t a, size_t b, size_t *out)
+{
+	if (a != 0 && b > SIZE_MAX / a) {
+		return CRYPTO_ERR_OVERFLOW;
+	}
+	*out = a * b;
+	return CRYPTO_OK;
+}
 
 static int neq0(u64 diff)
 {
@@ -649,6 +722,1052 @@ void crypto_blake2b(u8 *hash, size_t hash_size, const u8 *msg, size_t msg_size)
 {
 	crypto_blake2b_keyed(hash, hash_size, 0, 0, msg, msg_size);
 }
+
+int crypto_blake2b_checked(u8 *hash, size_t hash_size,
+                           const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(hash);
+	if (err != CRYPTO_OK) { return err; }
+	if (hash_size == 0 || hash_size > 64) { return CRYPTO_ERR_SIZE; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake2b(hash, hash_size, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake2b_keyed_checked(u8 *hash, size_t hash_size,
+                                 const u8 *key, size_t key_size,
+                                 const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(hash);
+	if (err != CRYPTO_OK) { return err; }
+	if (hash_size == 0 || hash_size > 64 || key_size > 64) {
+		return CRYPTO_ERR_SIZE;
+	}
+	err = check_ptr(key, key_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake2b_keyed(hash, hash_size, key, key_size,
+	                     message, message_size);
+	return CRYPTO_OK;
+}
+
+/////////////////
+/// SHA-256 ////
+/////////////////
+#define SHA256_BLOCK_SIZE 64
+
+static const u32 sha256_iv[8] = {
+	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+	0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+};
+
+static const u32 sha256_k[64] = {
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+#define SHA256_CH(x, y, z)  (((x) & (y)) ^ (~(x) & (z)))
+#define SHA256_MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define SHA256_BIG0(x)      (rotr32((x),  2) ^ rotr32((x), 13) ^ rotr32((x), 22))
+#define SHA256_BIG1(x)      (rotr32((x),  6) ^ rotr32((x), 11) ^ rotr32((x), 25))
+#define SHA256_SMALL0(x)    (rotr32((x),  7) ^ rotr32((x), 18) ^ ((x) >>  3))
+#define SHA256_SMALL1(x)    (rotr32((x), 17) ^ rotr32((x), 19) ^ ((x) >> 10))
+
+static void sha256_compress(crypto_sha256_ctx *ctx)
+{
+	u32 w[64];
+	load32_be_buf(w, ctx->input, 16);
+	FOR (i, 16, 64) {
+		w[i] = SHA256_SMALL1(w[i - 2]) + w[i - 7]
+		     + SHA256_SMALL0(w[i - 15]) + w[i - 16];
+	}
+
+	u32 a = ctx->hash[0];
+	u32 b = ctx->hash[1];
+	u32 c = ctx->hash[2];
+	u32 d = ctx->hash[3];
+	u32 e = ctx->hash[4];
+	u32 f = ctx->hash[5];
+	u32 g = ctx->hash[6];
+	u32 h = ctx->hash[7];
+
+	FOR (i, 0, 64) {
+		u32 t1 = h + SHA256_BIG1(e) + SHA256_CH(e, f, g) + sha256_k[i] + w[i];
+		u32 t2 = SHA256_BIG0(a) + SHA256_MAJ(a, b, c);
+		h = g;
+		g = f;
+		f = e;
+		e = d + t1;
+		d = c;
+		c = b;
+		b = a;
+		a = t1 + t2;
+	}
+
+	ctx->hash[0] += a;  ctx->hash[1] += b;
+	ctx->hash[2] += c;  ctx->hash[3] += d;
+	ctx->hash[4] += e;  ctx->hash[5] += f;
+	ctx->hash[6] += g;  ctx->hash[7] += h;
+}
+
+void crypto_sha256_init(crypto_sha256_ctx *ctx)
+{
+	COPY(ctx->hash, sha256_iv, 8);
+	ctx->input_size = 0;
+	ctx->input_idx  = 0;
+	ZERO(ctx->input, sizeof(ctx->input));
+}
+
+void crypto_sha256_update(crypto_sha256_ctx *ctx,
+                          const u8 *message, size_t message_size)
+{
+	if (message_size == 0) {
+		return;
+	}
+
+	while (message_size > 0) {
+		size_t take = MIN(SHA256_BLOCK_SIZE - ctx->input_idx, message_size);
+		COPY(ctx->input + ctx->input_idx, message, take);
+		ctx->input_idx += take;
+		message        += take;
+		message_size   -= take;
+
+		if (ctx->input_idx == SHA256_BLOCK_SIZE) {
+			ctx->input_size += 512;
+			sha256_compress(ctx);
+			ctx->input_idx = 0;
+			ZERO(ctx->input, sizeof(ctx->input));
+		}
+	}
+}
+
+void crypto_sha256_final(crypto_sha256_ctx *ctx, u8 hash[32])
+{
+	ctx->input_size += (u64)ctx->input_idx * 8;
+
+	ctx->input[ctx->input_idx] = 0x80;
+	ctx->input_idx++;
+
+	if (ctx->input_idx > 56) {
+		ZERO(ctx->input + ctx->input_idx, SHA256_BLOCK_SIZE - ctx->input_idx);
+		sha256_compress(ctx);
+		ctx->input_idx = 0;
+		ZERO(ctx->input, sizeof(ctx->input));
+	}
+
+	ZERO(ctx->input + ctx->input_idx, 56 - ctx->input_idx);
+	store64_be(ctx->input + 56, ctx->input_size);
+	sha256_compress(ctx);
+
+	store32_be_buf(hash, ctx->hash, 8);
+	WIPE_CTX(ctx);
+}
+
+void crypto_sha256(u8 hash[32], const u8 *message, size_t message_size)
+{
+	crypto_sha256_ctx ctx;
+	crypto_sha256_init  (&ctx);
+	crypto_sha256_update(&ctx, message, message_size);
+	crypto_sha256_final (&ctx, hash);
+}
+
+////////////////////
+/// HMAC SHA-256 ///
+////////////////////
+void crypto_sha256_hmac_init(crypto_sha256_hmac_ctx *ctx,
+                             const u8 *key, size_t key_size)
+{
+	if (key_size > 64) {
+		crypto_sha256(ctx->key, key, key_size);
+		key      = ctx->key;
+		key_size = 32;
+	}
+	FOR (i, 0, key_size)   { ctx->key[i] = key[i] ^ 0x36; }
+	FOR (i, key_size, 64)  { ctx->key[i] = 0x36; }
+	crypto_sha256_init  (&ctx->ctx);
+	crypto_sha256_update(&ctx->ctx, ctx->key, 64);
+}
+
+void crypto_sha256_hmac_update(crypto_sha256_hmac_ctx *ctx,
+                               const u8 *message, size_t message_size)
+{
+	crypto_sha256_update(&ctx->ctx, message, message_size);
+}
+
+void crypto_sha256_hmac_final(crypto_sha256_hmac_ctx *ctx, u8 hmac[32])
+{
+	crypto_sha256_final(&ctx->ctx, hmac);
+	FOR (i, 0, 64) {
+		ctx->key[i] ^= 0x36 ^ 0x5c;
+	}
+	crypto_sha256_init  (&ctx->ctx);
+	crypto_sha256_update(&ctx->ctx, ctx->key, 64);
+	crypto_sha256_update(&ctx->ctx, hmac, 32);
+	crypto_sha256_final (&ctx->ctx, hmac);
+	WIPE_CTX(ctx);
+}
+
+void crypto_sha256_hmac(u8 hmac[32], const u8 *key, size_t key_size,
+                        const u8 *message, size_t message_size)
+{
+	crypto_sha256_hmac_ctx ctx;
+	crypto_sha256_hmac_init  (&ctx, key, key_size);
+	crypto_sha256_hmac_update(&ctx, message, message_size);
+	crypto_sha256_hmac_final (&ctx, hmac);
+}
+
+////////////////////
+/// HKDF SHA-256 ///
+////////////////////
+void crypto_sha256_hkdf_expand(u8 *okm,  size_t okm_size,
+                               const u8 *prk,  size_t prk_size,
+                               const u8 *info, size_t info_size)
+{
+	u8   ctr = 1;
+	u8   blk[32];
+	u8  *o = okm;
+	u8  *r = okm + okm_size;
+	u8  *x = okm + 32;
+	u8  *m = x < r ? x : r;
+	size_t out_size = 0;
+	while (o < r) {
+		crypto_sha256_hmac_ctx ctx;
+		crypto_sha256_hmac_init(&ctx, prk , prk_size);
+		if (out_size > 0) {
+			crypto_sha256_hmac_update(&ctx, blk , sizeof(blk));
+		}
+		crypto_sha256_hmac_update(&ctx, info, info_size);
+		crypto_sha256_hmac_update(&ctx, &ctr, 1);
+		crypto_sha256_hmac_final(&ctx, blk);
+		size_t copy_len = (size_t)(m - o);
+		COPY(o, blk, copy_len);
+		out_size += 1;
+		o  = m;
+		x += 32;
+		m  = x < r ? x : r;
+		ctr++;
+	}
+	WIPE_BUFFER(blk);
+}
+
+void crypto_sha256_hkdf(u8 *okm, size_t okm_size,
+                        const u8 *ikm, size_t ikm_size,
+                        const u8 *salt, size_t salt_size,
+                        const u8 *info, size_t info_size)
+{
+	u8 prk[32];
+	crypto_sha256_hmac(prk, salt, salt_size, ikm, ikm_size);
+	crypto_sha256_hkdf_expand(okm, okm_size, prk, sizeof(prk), info, info_size);
+	WIPE_BUFFER(prk);
+}
+
+int crypto_sha256_checked(u8 hash[32],
+                          const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(hash);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256(hash, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_hmac_checked(u8 hmac[32],
+                               const u8 *key, size_t key_size,
+                               const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(hmac);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, key_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_hmac(hmac, key, key_size, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_hkdf_checked(u8 *okm, size_t okm_size,
+                               const u8 *ikm, size_t ikm_size,
+                               const u8 *salt, size_t salt_size,
+                               const u8 *info, size_t info_size)
+{
+	int err = check_out_ptr(okm);
+	if (err != CRYPTO_OK) { return err; }
+	if (okm_size > 32 * 255) { return CRYPTO_ERR_SIZE; }
+	err = check_ptr(ikm, ikm_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(salt, salt_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(info, info_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_hkdf(okm, okm_size, ikm, ikm_size, salt, salt_size,
+	                   info, info_size);
+	return CRYPTO_OK;
+}
+
+////////////////
+/// BLAKE3 ////
+////////////////
+#define BLAKE3_OUT_LEN   32
+#define BLAKE3_KEY_LEN   32
+#define BLAKE3_BLOCK_LEN 64
+#define BLAKE3_CHUNK_LEN 1024
+#define BLAKE3_MAX_DEPTH 54
+#define BLAKE3_MAX_SIMD_DEGREE 1
+#define BLAKE3_MAX_SIMD_DEGREE_OR_2 2
+
+enum blake3_flags {
+	BLAKE3_CHUNK_START         = 1 << 0,
+	BLAKE3_CHUNK_END           = 1 << 1,
+	BLAKE3_PARENT              = 1 << 2,
+	BLAKE3_ROOT                = 1 << 3,
+	BLAKE3_KEYED_HASH          = 1 << 4,
+	BLAKE3_DERIVE_KEY_CONTEXT  = 1 << 5,
+	BLAKE3_DERIVE_KEY_MATERIAL = 1 << 6,
+};
+
+static const u32 blake3_iv[8] = {
+	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+	0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+};
+
+static const u8 blake3_msg_schedule[7][16] = {
+	{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+	{2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8},
+	{3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1},
+	{10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6},
+	{12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4},
+	{9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7},
+	{11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13},
+};
+
+static u64 blake3_round_down_to_power_of_2(u64 x)
+{
+	if (x == 0) {
+		return 1;
+	}
+	u64 p = 1;
+	while (p <= x) {
+		p <<= 1;
+	}
+	return p >> 1;
+}
+
+static u32 blake3_counter_low(u64 counter) { return (u32)counter; }
+static u32 blake3_counter_high(u64 counter) { return (u32)(counter >> 32); }
+
+static void blake3_load_key_words(const u8 key[BLAKE3_KEY_LEN], u32 key_words[8])
+{
+	FOR (i, 0, 8) {
+		key_words[i] = load32_le(key + i * 4);
+	}
+}
+
+static void blake3_store_cv_words(u8 out[32], const u32 cv_words[8])
+{
+	FOR (i, 0, 8) {
+		store32_le(out + i * 4, cv_words[i]);
+	}
+}
+
+static u32 blake3_rotr32(u32 w, u32 c)
+{
+	return (w >> c) | (w << (32 - c));
+}
+
+static void blake3_g(u32 *state, size_t a, size_t b, size_t c, size_t d,
+                     u32 x, u32 y)
+{
+	state[a] = state[a] + state[b] + x;
+	state[d] = blake3_rotr32(state[d] ^ state[a], 16);
+	state[c] = state[c] + state[d];
+	state[b] = blake3_rotr32(state[b] ^ state[c], 12);
+	state[a] = state[a] + state[b] + y;
+	state[d] = blake3_rotr32(state[d] ^ state[a], 8);
+	state[c] = state[c] + state[d];
+	state[b] = blake3_rotr32(state[b] ^ state[c], 7);
+}
+
+static void blake3_round_fn(u32 state[16], const u32 *msg, size_t round)
+{
+	const u8 *schedule = blake3_msg_schedule[round];
+	blake3_g(state, 0, 4, 8, 12, msg[schedule[0]], msg[schedule[1]]);
+	blake3_g(state, 1, 5, 9, 13, msg[schedule[2]], msg[schedule[3]]);
+	blake3_g(state, 2, 6, 10, 14, msg[schedule[4]], msg[schedule[5]]);
+	blake3_g(state, 3, 7, 11, 15, msg[schedule[6]], msg[schedule[7]]);
+	blake3_g(state, 0, 5, 10, 15, msg[schedule[8]], msg[schedule[9]]);
+	blake3_g(state, 1, 6, 11, 12, msg[schedule[10]], msg[schedule[11]]);
+	blake3_g(state, 2, 7, 8, 13, msg[schedule[12]], msg[schedule[13]]);
+	blake3_g(state, 3, 4, 9, 14, msg[schedule[14]], msg[schedule[15]]);
+}
+
+static void blake3_compress_pre(u32 state[16], const u32 cv[8],
+                                const u8 block[BLAKE3_BLOCK_LEN],
+                                u8 block_len, u64 counter, u8 flags)
+{
+	u32 block_words[16];
+	FOR (i, 0, 16) {
+		block_words[i] = load32_le(block + i * 4);
+	}
+	state[0] = cv[0];
+	state[1] = cv[1];
+	state[2] = cv[2];
+	state[3] = cv[3];
+	state[4] = cv[4];
+	state[5] = cv[5];
+	state[6] = cv[6];
+	state[7] = cv[7];
+	state[8] = blake3_iv[0];
+	state[9] = blake3_iv[1];
+	state[10] = blake3_iv[2];
+	state[11] = blake3_iv[3];
+	state[12] = blake3_counter_low(counter);
+	state[13] = blake3_counter_high(counter);
+	state[14] = (u32)block_len;
+	state[15] = (u32)flags;
+
+	blake3_round_fn(state, block_words, 0);
+	blake3_round_fn(state, block_words, 1);
+	blake3_round_fn(state, block_words, 2);
+	blake3_round_fn(state, block_words, 3);
+	blake3_round_fn(state, block_words, 4);
+	blake3_round_fn(state, block_words, 5);
+	blake3_round_fn(state, block_words, 6);
+}
+
+static void blake3_compress_in_place(u32 cv[8],
+                                     const u8 block[BLAKE3_BLOCK_LEN],
+                                     u8 block_len, u64 counter, u8 flags)
+{
+	u32 state[16];
+	blake3_compress_pre(state, cv, block, block_len, counter, flags);
+	cv[0] = state[0] ^ state[8];
+	cv[1] = state[1] ^ state[9];
+	cv[2] = state[2] ^ state[10];
+	cv[3] = state[3] ^ state[11];
+	cv[4] = state[4] ^ state[12];
+	cv[5] = state[5] ^ state[13];
+	cv[6] = state[6] ^ state[14];
+	cv[7] = state[7] ^ state[15];
+}
+
+static void blake3_compress_xof(const u32 cv[8],
+                                const u8 block[BLAKE3_BLOCK_LEN],
+                                u8 block_len, u64 counter, u8 flags,
+                                u8 out[64])
+{
+	u32 state[16];
+	blake3_compress_pre(state, cv, block, block_len, counter, flags);
+
+	store32_le(out +  0, state[0] ^ state[8]);
+	store32_le(out +  4, state[1] ^ state[9]);
+	store32_le(out +  8, state[2] ^ state[10]);
+	store32_le(out + 12, state[3] ^ state[11]);
+	store32_le(out + 16, state[4] ^ state[12]);
+	store32_le(out + 20, state[5] ^ state[13]);
+	store32_le(out + 24, state[6] ^ state[14]);
+	store32_le(out + 28, state[7] ^ state[15]);
+	store32_le(out + 32, state[8] ^ cv[0]);
+	store32_le(out + 36, state[9] ^ cv[1]);
+	store32_le(out + 40, state[10] ^ cv[2]);
+	store32_le(out + 44, state[11] ^ cv[3]);
+	store32_le(out + 48, state[12] ^ cv[4]);
+	store32_le(out + 52, state[13] ^ cv[5]);
+	store32_le(out + 56, state[14] ^ cv[6]);
+	store32_le(out + 60, state[15] ^ cv[7]);
+}
+
+static void blake3_hash_one(const u8 *input, size_t blocks,
+                            const u32 key[8], u64 counter,
+                            u8 flags, u8 flags_start, u8 flags_end,
+                            u8 out[BLAKE3_OUT_LEN])
+{
+	u32 cv[8];
+	COPY(cv, key, 8);
+	u8 block_flags = flags | flags_start;
+	while (blocks > 0) {
+		if (blocks == 1) {
+			block_flags |= flags_end;
+		}
+		blake3_compress_in_place(cv, input, BLAKE3_BLOCK_LEN,
+		                         counter, block_flags);
+		input += BLAKE3_BLOCK_LEN;
+		blocks -= 1;
+		block_flags = flags;
+	}
+	blake3_store_cv_words(out, cv);
+}
+
+static void blake3_hash_many(const u8 *const *inputs, size_t num_inputs,
+                             size_t blocks, const u32 key[8],
+                             u64 counter, int increment_counter,
+                             u8 flags, u8 flags_start, u8 flags_end, u8 *out)
+{
+	while (num_inputs > 0) {
+		blake3_hash_one(inputs[0], blocks, key, counter, flags,
+		               flags_start, flags_end, out);
+		if (increment_counter) {
+			counter += 1;
+		}
+		inputs += 1;
+		num_inputs -= 1;
+		out += BLAKE3_OUT_LEN;
+	}
+}
+
+static void blake3_xof_many(const u32 cv[8], const u8 block[BLAKE3_BLOCK_LEN],
+                            u8 block_len, u64 counter, u8 flags,
+                            u8 *out, size_t outblocks)
+{
+	FOR (i, 0, outblocks) {
+		blake3_compress_xof(cv, block, block_len, counter + i, flags, out);
+		out += 64;
+	}
+}
+
+static size_t blake3_simd_degree(void)
+{
+	return BLAKE3_MAX_SIMD_DEGREE;
+}
+
+typedef struct {
+	u32 input_cv[8];
+	u64 counter;
+	u8  block[BLAKE3_BLOCK_LEN];
+	u8  block_len;
+	u8  flags;
+} blake3_output_t;
+
+static void blake3_chunk_state_init(crypto_blake3_ctx *self, const u32 key[8],
+                                    u8 flags)
+{
+	COPY(self->chunk.cv, key, 8);
+	self->chunk.chunk_counter = 0;
+	ZERO(self->chunk.buf, BLAKE3_BLOCK_LEN);
+	self->chunk.buf_len = 0;
+	self->chunk.blocks_compressed = 0;
+	self->chunk.flags = flags;
+}
+
+static void blake3_chunk_state_reset(crypto_blake3_ctx *self, const u32 key[8],
+                                     u64 chunk_counter)
+{
+	COPY(self->chunk.cv, key, 8);
+	self->chunk.chunk_counter = chunk_counter;
+	self->chunk.blocks_compressed = 0;
+	ZERO(self->chunk.buf, BLAKE3_BLOCK_LEN);
+	self->chunk.buf_len = 0;
+}
+
+static size_t blake3_chunk_state_len(const crypto_blake3_ctx *self)
+{
+	return (BLAKE3_BLOCK_LEN * (size_t)self->chunk.blocks_compressed)
+	     + (size_t)self->chunk.buf_len;
+}
+
+static size_t blake3_chunk_state_fill_buf(crypto_blake3_ctx *self,
+                                          const u8 *input, size_t input_len)
+{
+	size_t take = BLAKE3_BLOCK_LEN - (size_t)self->chunk.buf_len;
+	if (take > input_len) {
+		take = input_len;
+	}
+	COPY(self->chunk.buf + self->chunk.buf_len, input, take);
+	self->chunk.buf_len += (u8)take;
+	return take;
+}
+
+static u8 blake3_chunk_state_maybe_start_flag(const crypto_blake3_ctx *self)
+{
+	return self->chunk.blocks_compressed == 0 ? BLAKE3_CHUNK_START : 0;
+}
+
+static blake3_output_t blake3_make_output(const u32 input_cv[8],
+                                          const u8 block[BLAKE3_BLOCK_LEN],
+                                          u8 block_len, u64 counter, u8 flags)
+{
+	blake3_output_t ret;
+	COPY(ret.input_cv, input_cv, 8);
+	COPY(ret.block, block, BLAKE3_BLOCK_LEN);
+	ret.block_len = block_len;
+	ret.counter = counter;
+	ret.flags = flags;
+	return ret;
+}
+
+static void blake3_output_chaining_value(const blake3_output_t *self, u8 cv[32])
+{
+	u32 cv_words[8];
+	COPY(cv_words, self->input_cv, 8);
+	blake3_compress_in_place(cv_words, self->block, self->block_len,
+	                         self->counter, self->flags);
+	blake3_store_cv_words(cv, cv_words);
+}
+
+static void blake3_output_root_bytes(const blake3_output_t *self, u64 seek,
+                                     u8 *out, size_t out_len)
+{
+	if (out_len == 0) {
+		return;
+	}
+	u64 output_block_counter = seek / 64;
+	size_t offset_within_block = (size_t)(seek % 64);
+	u8 wide_buf[64];
+	if (offset_within_block) {
+		blake3_compress_xof(self->input_cv, self->block, self->block_len,
+		                    output_block_counter, self->flags | BLAKE3_ROOT,
+		                    wide_buf);
+		const size_t available_bytes = 64 - offset_within_block;
+		const size_t bytes = out_len > available_bytes ? available_bytes : out_len;
+		COPY(out, wide_buf + offset_within_block, bytes);
+		out += bytes;
+		out_len -= bytes;
+		output_block_counter += 1;
+	}
+	if (out_len / 64) {
+		blake3_xof_many(self->input_cv, self->block, self->block_len,
+		               output_block_counter, self->flags | BLAKE3_ROOT,
+		               out, out_len / 64);
+	}
+	output_block_counter += out_len / 64;
+	out += out_len & (size_t)-64;
+	out_len -= out_len & (size_t)-64;
+	if (out_len) {
+		blake3_compress_xof(self->input_cv, self->block, self->block_len,
+		                    output_block_counter, self->flags | BLAKE3_ROOT,
+		                    wide_buf);
+		COPY(out, wide_buf, out_len);
+	}
+}
+
+static void blake3_chunk_state_update(crypto_blake3_ctx *self,
+                                      const u8 *input, size_t input_len)
+{
+	if (self->chunk.buf_len > 0) {
+		size_t take = blake3_chunk_state_fill_buf(self, input, input_len);
+		input += take;
+		input_len -= take;
+		if (input_len > 0) {
+			blake3_compress_in_place(self->chunk.cv, self->chunk.buf,
+			                         BLAKE3_BLOCK_LEN, self->chunk.chunk_counter,
+			                         self->chunk.flags
+			                         | blake3_chunk_state_maybe_start_flag(self));
+			self->chunk.blocks_compressed += 1;
+			self->chunk.buf_len = 0;
+			ZERO(self->chunk.buf, BLAKE3_BLOCK_LEN);
+		}
+	}
+
+	while (input_len > BLAKE3_BLOCK_LEN) {
+		blake3_compress_in_place(self->chunk.cv, input, BLAKE3_BLOCK_LEN,
+		                         self->chunk.chunk_counter,
+		                         self->chunk.flags
+		                         | blake3_chunk_state_maybe_start_flag(self));
+		self->chunk.blocks_compressed += 1;
+		input += BLAKE3_BLOCK_LEN;
+		input_len -= BLAKE3_BLOCK_LEN;
+	}
+
+	blake3_chunk_state_fill_buf(self, input, input_len);
+}
+
+static blake3_output_t blake3_chunk_state_output(const crypto_blake3_ctx *self)
+{
+	u8 block_flags = self->chunk.flags
+	              | blake3_chunk_state_maybe_start_flag(self)
+	              | BLAKE3_CHUNK_END;
+	return blake3_make_output(self->chunk.cv, self->chunk.buf,
+	                          self->chunk.buf_len, self->chunk.chunk_counter,
+	                          block_flags);
+}
+
+static blake3_output_t blake3_parent_output(const u8 block[BLAKE3_BLOCK_LEN],
+                                            const u32 key[8], u8 flags)
+{
+	return blake3_make_output(key, block, BLAKE3_BLOCK_LEN, 0,
+	                          flags | BLAKE3_PARENT);
+}
+
+static size_t blake3_left_subtree_len(size_t input_len)
+{
+	size_t full_chunks = (input_len - 1) / BLAKE3_CHUNK_LEN;
+	return (size_t)blake3_round_down_to_power_of_2(full_chunks) * BLAKE3_CHUNK_LEN;
+}
+
+static size_t blake3_compress_chunks_parallel(const u8 *input, size_t input_len,
+                                              const u32 key[8],
+                                              u64 chunk_counter, u8 flags,
+                                              u8 *out)
+{
+	const u8 *chunks_array[BLAKE3_MAX_SIMD_DEGREE];
+	size_t input_position = 0;
+	size_t chunks_array_len = 0;
+	while (input_len - input_position >= BLAKE3_CHUNK_LEN) {
+		chunks_array[chunks_array_len] = &input[input_position];
+		input_position += BLAKE3_CHUNK_LEN;
+		chunks_array_len += 1;
+	}
+
+	blake3_hash_many(chunks_array, chunks_array_len,
+	                 BLAKE3_CHUNK_LEN / BLAKE3_BLOCK_LEN, key, chunk_counter,
+	                 1, flags, BLAKE3_CHUNK_START, BLAKE3_CHUNK_END, out);
+
+	if (input_len > input_position) {
+		u64 counter = chunk_counter + (u64)chunks_array_len;
+		crypto_blake3_ctx tmp;
+		blake3_chunk_state_init(&tmp, key, flags);
+		tmp.chunk.chunk_counter = counter;
+		blake3_chunk_state_update(&tmp, &input[input_position],
+		                          input_len - input_position);
+		blake3_output_t output = blake3_chunk_state_output(&tmp);
+		blake3_output_chaining_value(&output,
+		                             &out[chunks_array_len * BLAKE3_OUT_LEN]);
+		return chunks_array_len + 1;
+	}
+	return chunks_array_len;
+}
+
+static size_t blake3_compress_parents_parallel(const u8 *child_cvs,
+                                               size_t num_chaining_values,
+                                               const u32 key[8], u8 flags,
+                                               u8 *out)
+{
+	const u8 *parents_array[BLAKE3_MAX_SIMD_DEGREE_OR_2];
+	size_t parents_array_len = 0;
+	while (num_chaining_values - (2 * parents_array_len) >= 2) {
+		parents_array[parents_array_len] =
+			&child_cvs[2 * parents_array_len * BLAKE3_OUT_LEN];
+		parents_array_len += 1;
+	}
+
+	blake3_hash_many(parents_array, parents_array_len, 1, key,
+	                 0, 0, flags | BLAKE3_PARENT, 0, 0, out);
+
+	if (num_chaining_values > 2 * parents_array_len) {
+		COPY(&out[parents_array_len * BLAKE3_OUT_LEN],
+		     &child_cvs[2 * parents_array_len * BLAKE3_OUT_LEN],
+		     BLAKE3_OUT_LEN);
+		return parents_array_len + 1;
+	}
+	return parents_array_len;
+}
+
+static size_t blake3_compress_subtree_wide(const u8 *input, size_t input_len,
+                                           const u32 key[8],
+                                           u64 chunk_counter, u8 flags,
+                                           u8 *out)
+{
+	if (input_len <= blake3_simd_degree() * BLAKE3_CHUNK_LEN) {
+		return blake3_compress_chunks_parallel(input, input_len, key,
+		                                       chunk_counter, flags, out);
+	}
+
+	size_t left_input_len = blake3_left_subtree_len(input_len);
+	size_t right_input_len = input_len - left_input_len;
+	const u8 *right_input = &input[left_input_len];
+	u64 right_chunk_counter =
+		chunk_counter + (u64)(left_input_len / BLAKE3_CHUNK_LEN);
+
+	u8 cv_array[2 * BLAKE3_MAX_SIMD_DEGREE_OR_2 * BLAKE3_OUT_LEN];
+	size_t degree = blake3_simd_degree();
+	if (left_input_len > BLAKE3_CHUNK_LEN && degree == 1) {
+		degree = 2;
+	}
+	u8 *right_cvs = &cv_array[degree * BLAKE3_OUT_LEN];
+
+	size_t left_n = blake3_compress_subtree_wide(input, left_input_len, key,
+	                                             chunk_counter, flags, cv_array);
+	size_t right_n = blake3_compress_subtree_wide(right_input, right_input_len,
+	                                              key, right_chunk_counter,
+	                                              flags, right_cvs);
+
+	if (left_n == 1) {
+		COPY(out, cv_array, 2 * BLAKE3_OUT_LEN);
+		return 2;
+	}
+
+	size_t num_chaining_values = left_n + right_n;
+	return blake3_compress_parents_parallel(cv_array, num_chaining_values, key,
+	                                        flags, out);
+}
+
+static void blake3_compress_subtree_to_parent_node(const u8 *input,
+                                                   size_t input_len,
+                                                   const u32 key[8],
+                                                   u64 chunk_counter, u8 flags,
+                                                   u8 out[2 * BLAKE3_OUT_LEN])
+{
+	u8 cv_array[BLAKE3_MAX_SIMD_DEGREE_OR_2 * BLAKE3_OUT_LEN];
+	size_t num_cvs = blake3_compress_subtree_wide(input, input_len, key,
+	                                             chunk_counter, flags, cv_array);
+	while (num_cvs > 2) {
+		u8 out_array[BLAKE3_MAX_SIMD_DEGREE_OR_2 * BLAKE3_OUT_LEN / 2];
+		num_cvs = blake3_compress_parents_parallel(cv_array, num_cvs, key,
+		                                           flags, out_array);
+		COPY(cv_array, out_array, num_cvs * BLAKE3_OUT_LEN);
+	}
+	COPY(out, cv_array, 2 * BLAKE3_OUT_LEN);
+}
+
+static u32 blake3_popcnt(u64 x)
+{
+	u32 count = 0;
+	while (x != 0) {
+		count += 1;
+		x &= x - 1;
+	}
+	return count;
+}
+
+static void blake3_merge_cv_stack(crypto_blake3_ctx *self, u64 total_len)
+{
+	size_t post_merge_stack_len = (size_t)blake3_popcnt(total_len);
+	while (self->cv_stack_len > post_merge_stack_len) {
+		u8 *parent_node =
+			&self->cv_stack[(self->cv_stack_len - 2) * BLAKE3_OUT_LEN];
+		blake3_output_t output = blake3_parent_output(parent_node,
+		                                              self->key,
+		                                              self->chunk.flags);
+		blake3_output_chaining_value(&output, parent_node);
+		self->cv_stack_len -= 1;
+	}
+}
+
+static void blake3_push_cv(crypto_blake3_ctx *self, u8 new_cv[BLAKE3_OUT_LEN],
+                           u64 chunk_counter)
+{
+	blake3_merge_cv_stack(self, chunk_counter);
+	COPY(&self->cv_stack[self->cv_stack_len * BLAKE3_OUT_LEN], new_cv,
+	     BLAKE3_OUT_LEN);
+	self->cv_stack_len += 1;
+}
+
+static void blake3_init_base(crypto_blake3_ctx *self, const u32 key[8],
+                             u8 flags)
+{
+	COPY(self->key, key, 8);
+	blake3_chunk_state_init(self, key, flags);
+	self->cv_stack_len = 0;
+}
+
+void crypto_blake3_init(crypto_blake3_ctx *ctx)
+{
+	blake3_init_base(ctx, blake3_iv, 0);
+}
+
+void crypto_blake3_keyed_init(crypto_blake3_ctx *ctx,
+                              const u8 key[BLAKE3_KEY_LEN])
+{
+	u32 key_words[8];
+	blake3_load_key_words(key, key_words);
+	blake3_init_base(ctx, key_words, BLAKE3_KEYED_HASH);
+}
+
+void crypto_blake3_derive_key_init(crypto_blake3_ctx *ctx,
+                                   const u8 *context, size_t context_size)
+{
+	crypto_blake3_ctx context_hasher;
+	blake3_init_base(&context_hasher, blake3_iv, BLAKE3_DERIVE_KEY_CONTEXT);
+	crypto_blake3_update(&context_hasher, context, context_size);
+	u8 context_key[BLAKE3_KEY_LEN];
+	crypto_blake3_final(&context_hasher, context_key, BLAKE3_KEY_LEN);
+	u32 context_key_words[8];
+	blake3_load_key_words(context_key, context_key_words);
+	blake3_init_base(ctx, context_key_words, BLAKE3_DERIVE_KEY_MATERIAL);
+	WIPE_BUFFER(context_key);
+	WIPE_CTX(&context_hasher);
+}
+
+void crypto_blake3_update(crypto_blake3_ctx *self,
+                          const u8 *input, size_t input_len)
+{
+	if (input_len == 0) {
+		return;
+	}
+
+	const u8 *input_bytes = input;
+	if (blake3_chunk_state_len(self) > 0) {
+		size_t take = BLAKE3_CHUNK_LEN - blake3_chunk_state_len(self);
+		if (take > input_len) {
+			take = input_len;
+		}
+		blake3_chunk_state_update(self, input_bytes, take);
+		input_bytes += take;
+		input_len -= take;
+		if (input_len > 0) {
+			blake3_output_t output = blake3_chunk_state_output(self);
+			u8 chunk_cv[32];
+			blake3_output_chaining_value(&output, chunk_cv);
+			blake3_push_cv(self, chunk_cv, self->chunk.chunk_counter);
+			blake3_chunk_state_reset(self, self->key,
+			                         self->chunk.chunk_counter + 1);
+		} else {
+			return;
+		}
+	}
+
+	while (input_len > BLAKE3_CHUNK_LEN) {
+		size_t subtree_len = (size_t)blake3_round_down_to_power_of_2(input_len);
+		u64 count_so_far = self->chunk.chunk_counter * BLAKE3_CHUNK_LEN;
+		while ((((u64)(subtree_len - 1)) & count_so_far) != 0) {
+			subtree_len /= 2;
+		}
+		u64 subtree_chunks = subtree_len / BLAKE3_CHUNK_LEN;
+		if (subtree_len <= BLAKE3_CHUNK_LEN) {
+			crypto_blake3_ctx chunk_state;
+			blake3_chunk_state_init(&chunk_state, self->key, self->chunk.flags);
+			chunk_state.chunk.chunk_counter = self->chunk.chunk_counter;
+			blake3_chunk_state_update(&chunk_state, input_bytes, subtree_len);
+			blake3_output_t output = blake3_chunk_state_output(&chunk_state);
+			u8 cv[BLAKE3_OUT_LEN];
+			blake3_output_chaining_value(&output, cv);
+			blake3_push_cv(self, cv, chunk_state.chunk.chunk_counter);
+		} else {
+			u8 cv_pair[2 * BLAKE3_OUT_LEN];
+			blake3_compress_subtree_to_parent_node(input_bytes, subtree_len,
+			                                       self->key,
+			                                       self->chunk.chunk_counter,
+			                                       self->chunk.flags, cv_pair);
+			blake3_push_cv(self, cv_pair, self->chunk.chunk_counter);
+			blake3_push_cv(self, &cv_pair[BLAKE3_OUT_LEN],
+			               self->chunk.chunk_counter + (subtree_chunks / 2));
+		}
+		self->chunk.chunk_counter += subtree_chunks;
+		input_bytes += subtree_len;
+		input_len -= subtree_len;
+	}
+
+	if (input_len > 0) {
+		blake3_chunk_state_update(self, input_bytes, input_len);
+		blake3_merge_cv_stack(self, self->chunk.chunk_counter);
+	}
+}
+
+void crypto_blake3_final_seek(const crypto_blake3_ctx *self, u64 seek,
+                              u8 *out, size_t out_len)
+{
+	if (out_len == 0) {
+		return;
+	}
+
+	if (self->cv_stack_len == 0) {
+		blake3_output_t output = blake3_chunk_state_output(self);
+		blake3_output_root_bytes(&output, seek, out, out_len);
+		return;
+	}
+
+	blake3_output_t output;
+	size_t cvs_remaining;
+	if (blake3_chunk_state_len(self) > 0) {
+		cvs_remaining = self->cv_stack_len;
+		output = blake3_chunk_state_output(self);
+	} else {
+		cvs_remaining = self->cv_stack_len - 2;
+		output = blake3_parent_output(&self->cv_stack[cvs_remaining * 32],
+		                              self->key, self->chunk.flags);
+	}
+	while (cvs_remaining > 0) {
+		cvs_remaining -= 1;
+		u8 parent_block[BLAKE3_BLOCK_LEN];
+		COPY(parent_block, &self->cv_stack[cvs_remaining * 32], 32);
+		blake3_output_chaining_value(&output, &parent_block[32]);
+		output = blake3_parent_output(parent_block, self->key,
+		                              self->chunk.flags);
+	}
+	blake3_output_root_bytes(&output, seek, out, out_len);
+}
+
+void crypto_blake3_final(crypto_blake3_ctx *ctx, u8 *out, size_t out_len)
+{
+	crypto_blake3_final_seek(ctx, 0, out, out_len);
+	WIPE_CTX(ctx);
+}
+
+void crypto_blake3(u8 *out, size_t out_len,
+                   const u8 *message, size_t message_size)
+{
+	crypto_blake3_ctx ctx;
+	crypto_blake3_init(&ctx);
+	crypto_blake3_update(&ctx, message, message_size);
+	crypto_blake3_final(&ctx, out, out_len);
+}
+
+void crypto_blake3_keyed(u8 *out, size_t out_len,
+                         const u8 key[BLAKE3_KEY_LEN],
+                         const u8 *message, size_t message_size)
+{
+	crypto_blake3_ctx ctx;
+	crypto_blake3_keyed_init(&ctx, key);
+	crypto_blake3_update(&ctx, message, message_size);
+	crypto_blake3_final(&ctx, out, out_len);
+}
+
+void crypto_blake3_derive_key(u8 *out, size_t out_len,
+                              const u8 *context, size_t context_size,
+                              const u8 *message, size_t message_size)
+{
+	crypto_blake3_ctx ctx;
+	crypto_blake3_derive_key_init(&ctx, context, context_size);
+	crypto_blake3_update(&ctx, message, message_size);
+	crypto_blake3_final(&ctx, out, out_len);
+}
+
+int crypto_blake3_checked(u8 *out, size_t out_len,
+                          const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(out);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3(out, out_len, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_keyed_checked(u8 *out, size_t out_len,
+                                const u8 key[BLAKE3_KEY_LEN],
+                                const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(out);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, BLAKE3_KEY_LEN);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_keyed(out, out_len, key, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_derive_key_checked(u8 *out, size_t out_len,
+                                     const u8 *context, size_t context_size,
+                                     const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(out);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(context, context_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_derive_key(out, out_len, context, context_size,
+	                         message, message_size);
+	return CRYPTO_OK;
+}
+
 
 //////////////
 /// Argon2 ///

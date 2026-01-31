@@ -114,6 +114,22 @@ static void test_verify(void)
 	p_verify(64, crypto_verify64);
 }
 
+static u8 hex_nibble(char c)
+{
+	if (c >= '0' && c <= '9') { return (u8)(c - '0'); }
+	if (c >= 'a' && c <= 'f') { return (u8)(c - 'a' + 10); }
+	if (c >= 'A' && c <= 'F') { return (u8)(c - 'A' + 10); }
+	return 0;
+}
+
+static void hex_to_bytes(u8 *out, size_t out_size, const char *hex)
+{
+	FOR (i, 0, out_size) {
+		out[i] = (u8)((hex_nibble(hex[i * 2]) << 4)
+		       |        hex_nibble(hex[i * 2 + 1]));
+	}
+}
+
 ////////////////
 /// Chacha20 ///
 ////////////////
@@ -488,6 +504,64 @@ static void test_blake2b(void)
 	}
 }
 
+static void test_sha256(void)
+{
+	printf("\tSHA-256\n");
+	// NIST CAVP SHA256 ShortMsg vectors (Len=0, Len=24)
+	static const u8 empty_msg[1] = {0};
+	static const u8 msg_24[3] = {0xb4, 0x19, 0x0e};
+	u8 expected0[32];
+	u8 expected1[32];
+	u8 hash[32];
+
+	hex_to_bytes(expected0, sizeof(expected0),
+	             "e3b0c44298fc1c149afbf4c8996fb924"
+	             "27ae41e4649b934ca495991b7852b855");
+	hex_to_bytes(expected1, sizeof(expected1),
+	             "dff2e73091f6c05e528896c4c831b944"
+	             "8653dc2ff043528f6769437bc7b975c2");
+
+	crypto_sha256(hash, empty_msg, 0);
+	ASSERT_EQUAL(hash, expected0, 32);
+	crypto_sha256(hash, msg_24, sizeof(msg_24));
+	ASSERT_EQUAL(hash, expected1, 32);
+
+	// HMAC-SHA-256 (RFC 4231, test case 1)
+	{
+		u8 key[20];
+		FOR (i, 0, 20) { key[i] = 0x0b; }
+		static const u8 data[] = {0x48,0x69,0x20,0x54,0x68,0x65,0x72,0x65};
+		u8 expected[32];
+		hex_to_bytes(expected, sizeof(expected),
+		             "b0344c61d8db38535ca8afceaf0bf12b"
+		             "881dc200c9833da726e9376c2e32cff7");
+		crypto_sha256_hmac(hash, key, sizeof(key), data, sizeof(data));
+		ASSERT_EQUAL(hash, expected, 32);
+	}
+
+	// HKDF-SHA-256 (RFC 5869, test case 1)
+	{
+		u8 ikm[22];
+		FOR (i, 0, 22) { ikm[i] = 0x0b; }
+		static const u8 salt[] = {
+			0x00,0x01,0x02,0x03,0x04,0x05,0x06,
+			0x07,0x08,0x09,0x0a,0x0b,0x0c
+		};
+		static const u8 info[] = {
+			0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9
+		};
+		u8 okm[42];
+		u8 expected[42];
+		hex_to_bytes(expected, sizeof(expected),
+		             "3cb25f25faacd57a90434f64d0362f2a"
+		             "2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
+		             "34007208d5b887185865");
+		crypto_sha256_hkdf(okm, sizeof(okm), ikm, sizeof(ikm),
+		                   salt, sizeof(salt), info, sizeof(info));
+		ASSERT_EQUAL(okm, expected, sizeof(okm));
+	}
+}
+
 ///////////////
 /// SHA 512 ///
 ///////////////
@@ -601,6 +675,38 @@ static void test_sha512(void)
 		crypto_sha512_hmac(input+i, key, 32, input + 64, SHA_512_BLOCK_SIZE);
 		ASSERT_EQUAL(hash, input + i, 64);
 	}
+}
+
+static void test_blake3(void)
+{
+	printf("\tBLAKE3\n");
+	u8 hash[32];
+	u8 expected[32];
+
+	// Empty input hash (BLAKE3 official test vectors)
+	hex_to_bytes(expected, sizeof(expected),
+	             "af1349b9f5f9a1a6a0404dea36dcc949"
+	             "9bcb25c9adc112b7cc9a93cae41f3262");
+	crypto_blake3(hash, sizeof(hash), 0, 0);
+	ASSERT_EQUAL(hash, expected, 32);
+
+	// Keyed hash (empty input)
+	hex_to_bytes(expected, sizeof(expected),
+	             "92b2b75604ed3c761f9d6f62392c8a92"
+	             "27ad0ea3f09573e783f1498a4ed60d26");
+	static const u8 key[] = "whats the Elvish word for friend";
+	crypto_blake3_keyed(hash, sizeof(hash), key, 0, 0);
+	ASSERT_EQUAL(hash, expected, 32);
+
+	// Derive key (empty input)
+	hex_to_bytes(expected, sizeof(expected),
+	             "2cc39783c223154fea8dfb7c1b1660f2"
+	             "ac2dcbd1c1de8277b0b0dd39b7e50d7d");
+	static const u8 context[] =
+		"BLAKE3 2019-12-27 16:29:52 test vectors context";
+	crypto_blake3_derive_key(hash, sizeof(hash),
+	                         context, sizeof(context) - 1, 0, 0);
+	ASSERT_EQUAL(hash, expected, 32);
 }
 
 
@@ -1230,7 +1336,9 @@ int main(int argc, char *argv[])
 	printf("Hashes:\n");
 	test_poly1305();
 	test_blake2b();
+	test_sha256();
 	test_sha512();
+	test_blake3();
 	test_argon2();
 
 	printf("X25519:\n");
