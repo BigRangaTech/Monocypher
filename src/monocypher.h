@@ -76,6 +76,9 @@ int crypto_verify64(const uint8_t a[64], const uint8_t b[64]);
 // --------------------
 void crypto_wipe(void *secret, size_t size);
 
+// OS-backed random bytes (preferred)
+int crypto_random(uint8_t *out, size_t out_size);
+
 // Checked API error codes
 // -----------------------
 typedef enum {

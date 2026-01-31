@@ -114,6 +114,21 @@ static void test_verify(void)
 	p_verify(64, crypto_verify64);
 }
 
+static void test_checked(void)
+{
+	printf("\tChecked API\n");
+	u8 hash32[32];
+	u8 hash64[64];
+
+	ASSERT(crypto_sha256_checked(hash32, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_sha256_checked(0, 0, 0) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake2b_checked(hash64, 0, 0, 0) == CRYPTO_ERR_SIZE);
+	ASSERT(crypto_sha256_hkdf_checked(hash32, 32 * 255 + 1,
+	                                  0, 0, 0, 0, 0, 0) == CRYPTO_ERR_SIZE);
+	ASSERT(crypto_chacha20_djb_checked(0, 0, 1, hash32, hash32, 0, 0)
+	       == CRYPTO_ERR_NULL);
+}
+
 static u8 hex_nibble(char c)
 {
 	if (c >= '0' && c <= '9') { return (u8)(c - '0'); }
@@ -1328,6 +1343,7 @@ int main(int argc, char *argv[])
 
 	printf("Comparisons:\n");
 	test_verify();
+	test_checked();
 
 	printf("Encryption:\n");
 	test_chacha20();

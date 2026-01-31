@@ -408,6 +408,61 @@ void crypto_sha512_hkdf(u8       *okm , size_t okm_size,
 	crypto_sha512_hkdf_expand(okm, okm_size, prk, sizeof(prk), info, info_size);
 }
 
+int crypto_sha512_checked(u8 hash[64],
+                          const u8 *message, size_t message_size)
+{
+	if (hash == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	if (message_size != 0 && message == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	crypto_sha512(hash, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha512_hmac_checked(u8 hmac[64],
+                               const u8 *key, size_t key_size,
+                               const u8 *message, size_t message_size)
+{
+	if (hmac == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	if (key_size != 0 && key == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	if (message_size != 0 && message == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	crypto_sha512_hmac(hmac, key, key_size, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha512_hkdf_checked(u8       *okm, size_t okm_size,
+                               const u8 *ikm, size_t ikm_size,
+                               const u8 *salt, size_t salt_size,
+                               const u8 *info, size_t info_size)
+{
+	if (okm == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	if (okm_size > 64 * 255) {
+		return CRYPTO_ERR_SIZE;
+	}
+	if (ikm_size != 0 && ikm == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	if (salt_size != 0 && salt == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	if (info_size != 0 && info == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	crypto_sha512_hkdf(okm, okm_size, ikm, ikm_size,
+	                   salt, salt_size, info, info_size);
+	return CRYPTO_OK;
+}
+
 ///////////////
 /// Ed25519 ///
 ///////////////

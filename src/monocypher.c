@@ -53,6 +53,20 @@
 
 #include "monocypher.h"
 #include <limits.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <bcrypt.h>
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+#if defined(__GLIBC__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    defined(__NetBSD__) || defined(__APPLE__)
+extern void explicit_bzero(void *s, size_t n);
+#define HAVE_EXPLICIT_BZERO 1
+#endif
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 namespace MONOCYPHER_CPP_NAMESPACE {
@@ -235,9 +249,64 @@ int crypto_verify64(const u8 a[64], const u8 b[64]){ return neq0(x64(a, b)); }
 
 void crypto_wipe(void *secret, size_t size)
 {
+	if (size == 0 || secret == 0) {
+		return;
+	}
+#if defined(__STDC_LIB_EXT1__)
+	memset_s(secret, size, 0, size);
+#elif defined(HAVE_EXPLICIT_BZERO)
+	explicit_bzero(secret, size);
+#else
 	volatile u8 *v_secret = (u8*)secret;
 	ZERO(v_secret, size);
+#endif
 }
+
+int crypto_random(u8 *out, size_t out_size)
+{
+	if (out_size == 0) {
+		return CRYPTO_OK;
+	}
+	if (out == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+#ifdef _WIN32
+	if (out_size > ULONG_MAX) {
+		return CRYPTO_ERR_SIZE;
+	}
+	if (BCryptGenRandom(NULL, out, (ULONG)out_size,
+	                    BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+		return CRYPTO_ERR_CONFIG;
+	}
+	return CRYPTO_OK;
+#else
+	int fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0) {
+		return CRYPTO_ERR_CONFIG;
+	}
+	size_t remaining = out_size;
+	u8 *p = out;
+	while (remaining > 0) {
+		ssize_t n = read(fd, p, remaining);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			close(fd);
+			return CRYPTO_ERR_CONFIG;
+		}
+		if (n == 0) {
+			close(fd);
+			return CRYPTO_ERR_CONFIG;
+		}
+		p += (size_t)n;
+		remaining -= (size_t)n;
+	}
+	close(fd);
+	return CRYPTO_OK;
+#endif
+}
+
 
 /////////////////
 /// Chacha 20 ///
@@ -368,6 +437,83 @@ u64 crypto_chacha20_x(u8 *cipher_text, const u8 *plain_text,
 	WIPE_BUFFER(sub_key);
 	return ctr;
 }
+
+int crypto_chacha20_djb_checked(u8 *cipher_text, const u8 *plain_text,
+                                size_t text_size,
+                                const u8 key[32], const u8 nonce[8],
+                                u64 ctr, u64 *ctr_out)
+{
+	int err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 8);
+	if (err != CRYPTO_OK) { return err; }
+	if (text_size != 0 && cipher_text == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	u64 blocks = text_size / 64 + (text_size % 64 != 0);
+	u64 new_ctr = 0;
+	err = checked_add_u64(ctr, blocks, &new_ctr);
+	if (err != CRYPTO_OK) { return err; }
+	u64 out_ctr = crypto_chacha20_djb(cipher_text, plain_text, text_size,
+	                                  key, nonce, ctr);
+	if (ctr_out != 0) {
+		*ctr_out = out_ctr;
+	}
+	return CRYPTO_OK;
+}
+
+int crypto_chacha20_ietf_checked(u8 *cipher_text, const u8 *plain_text,
+                                 size_t text_size,
+                                 const u8 key[32], const u8 nonce[12],
+                                 u32 ctr, u32 *ctr_out)
+{
+	int err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 12);
+	if (err != CRYPTO_OK) { return err; }
+	if (text_size != 0 && cipher_text == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	u64 blocks64 = text_size / 64 + (text_size % 64 != 0);
+	if (blocks64 > UINT32_MAX) {
+		return CRYPTO_ERR_OVERFLOW;
+	}
+	u32 blocks = (u32)blocks64;
+	u32 new_ctr = 0;
+	err = checked_add_u32(ctr, blocks, &new_ctr);
+	if (err != CRYPTO_OK) { return err; }
+	u32 out_ctr = crypto_chacha20_ietf(cipher_text, plain_text, text_size,
+	                                   key, nonce, ctr);
+	if (ctr_out != 0) {
+		*ctr_out = out_ctr;
+	}
+	return CRYPTO_OK;
+}
+
+int crypto_chacha20_x_checked(u8 *cipher_text, const u8 *plain_text,
+                              size_t text_size,
+                              const u8 key[32], const u8 nonce[24],
+                              u64 ctr, u64 *ctr_out)
+{
+	int err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 24);
+	if (err != CRYPTO_OK) { return err; }
+	if (text_size != 0 && cipher_text == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	u64 blocks = text_size / 64 + (text_size % 64 != 0);
+	u64 new_ctr = 0;
+	err = checked_add_u64(ctr, blocks, &new_ctr);
+	if (err != CRYPTO_OK) { return err; }
+	u64 out_ctr = crypto_chacha20_x(cipher_text, plain_text, text_size,
+	                                key, nonce, ctr);
+	if (ctr_out != 0) {
+		*ctr_out = out_ctr;
+	}
+	return CRYPTO_OK;
+}
+
 
 /////////////////
 /// Poly 1305 ///
@@ -2038,6 +2184,46 @@ void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
 	WIPE_BUFFER(final_block);
 }
 
+int crypto_argon2_checked(u8 *hash, u32 hash_size,
+                          void *work_area, size_t work_area_size,
+                          crypto_argon2_config config,
+                          crypto_argon2_inputs inputs,
+                          crypto_argon2_extras extras)
+{
+	int err = check_out_ptr(hash);
+	if (err != CRYPTO_OK) { return err; }
+	if (hash_size == 0) { return CRYPTO_ERR_SIZE; }
+	if (config.algorithm != CRYPTO_ARGON2_D &&
+	    config.algorithm != CRYPTO_ARGON2_I &&
+	    config.algorithm != CRYPTO_ARGON2_ID) {
+		return CRYPTO_ERR_CONFIG;
+	}
+	if (config.nb_lanes == 0 || config.nb_passes == 0) {
+		return CRYPTO_ERR_CONFIG;
+	}
+	if (config.nb_blocks < 8 * config.nb_lanes) {
+		return CRYPTO_ERR_CONFIG;
+	}
+	if (work_area == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	size_t needed = 0;
+	err = checked_mul_size((size_t)config.nb_blocks, 1024, &needed);
+	if (err != CRYPTO_OK) { return err; }
+	if (work_area_size < needed) { return CRYPTO_ERR_SIZE; }
+	err = check_ptr(inputs.pass, inputs.pass_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(inputs.salt, inputs.salt_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(extras.key, extras.key_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(extras.ad, extras.ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_argon2(hash, hash_size, work_area, config, inputs, extras);
+	return CRYPTO_OK;
+}
+
+
 ////////////////////////////////////
 /// Arithmetic modulo 2^255 - 19 ///
 ////////////////////////////////////
@@ -2672,6 +2858,32 @@ void crypto_x25519(u8       raw_shared_secret[32],
 	scalarmult(raw_shared_secret, e, their_public_key, 255);
 	WIPE_BUFFER(e);
 }
+
+int crypto_x25519_public_key_checked(u8 public_key[32],
+                                     const u8 secret_key[32])
+{
+	int err = check_out_ptr(public_key);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(secret_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_x25519_public_key(public_key, secret_key);
+	return CRYPTO_OK;
+}
+
+int crypto_x25519_checked(u8 raw_shared_secret[32],
+                          const u8 your_secret_key[32],
+                          const u8 their_public_key[32])
+{
+	int err = check_out_ptr(raw_shared_secret);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(your_secret_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(their_public_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_x25519(raw_shared_secret, your_secret_key, their_public_key);
+	return CRYPTO_OK;
+}
+
 
 void crypto_x25519_public_key(u8       public_key[32],
                               const u8 secret_key[32])
@@ -4069,6 +4281,104 @@ int crypto_aead_unlock(u8 *plain_text, const u8  mac[16], const u8 key[32],
 	crypto_wipe(&ctx, sizeof(ctx));
 	return mismatch;
 }
+
+int crypto_aead_lock_checked(u8 *cipher_text, u8 mac[16],
+                             const u8 key[32], const u8 nonce[24],
+                             const u8 *ad, size_t ad_size,
+                             const u8 *plain_text, size_t text_size)
+{
+	int err = check_out_ptr(cipher_text);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(mac);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 24);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(ad, ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(plain_text, text_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_aead_lock(cipher_text, mac, key, nonce, ad, ad_size,
+	                 plain_text, text_size);
+	return CRYPTO_OK;
+}
+
+int crypto_aead_unlock_checked(u8 *plain_text, const u8 mac[16],
+                               const u8 key[32], const u8 nonce[24],
+                               const u8 *ad, size_t ad_size,
+                               const u8 *cipher_text, size_t text_size)
+{
+	int err = check_out_ptr(plain_text);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(mac, 16);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 24);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(ad, ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(cipher_text, text_size);
+	if (err != CRYPTO_OK) { return err; }
+	int mismatch = crypto_aead_unlock(plain_text, mac, key, nonce, ad,
+	                                  ad_size, cipher_text, text_size);
+	return mismatch ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
+
+int crypto_aead_write_checked(crypto_aead_ctx *ctx, u8 *cipher_text,
+                              u8 mac[16], const u8 *ad, size_t ad_size,
+                              const u8 *plain_text, size_t text_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	if (text_size != 0 && cipher_text == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	err = check_out_ptr(mac);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(ad, ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(plain_text, text_size);
+	if (err != CRYPTO_OK) { return err; }
+	u64 blocks = text_size / 64 + (text_size % 64 != 0);
+	u64 ctr1 = 0;
+	err = checked_add_u64(ctx->counter, 1, &ctr1);
+	if (err != CRYPTO_OK) { return err; }
+	u64 end = 0;
+	err = checked_add_u64(ctr1, blocks, &end);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_aead_write(ctx, cipher_text, mac, ad, ad_size, plain_text, text_size);
+	return CRYPTO_OK;
+}
+
+int crypto_aead_read_checked(crypto_aead_ctx *ctx, u8 *plain_text,
+                             const u8 mac[16], const u8 *ad, size_t ad_size,
+                             const u8 *cipher_text, size_t text_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	if (text_size != 0 && plain_text == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	err = check_ptr(mac, 16);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(ad, ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(cipher_text, text_size);
+	if (err != CRYPTO_OK) { return err; }
+	u64 blocks = text_size / 64 + (text_size % 64 != 0);
+	u64 ctr1 = 0;
+	err = checked_add_u64(ctx->counter, 1, &ctr1);
+	if (err != CRYPTO_OK) { return err; }
+	u64 end = 0;
+	err = checked_add_u64(ctr1, blocks, &end);
+	if (err != CRYPTO_OK) { return err; }
+	int mismatch = crypto_aead_read(ctx, plain_text, mac, ad, ad_size,
+	                                cipher_text, text_size);
+	return mismatch ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
+
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 }

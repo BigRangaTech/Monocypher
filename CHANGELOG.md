@@ -5,6 +5,12 @@ Unreleased
 - Added SHA-256 (hash, HMAC, HKDF) to core.
 - Added BLAKE3 (hash, keyed hash, derive-key mode) to core.
 - Relicensed fork under GPL-2.0-or-later (see LICENSE and NOTICE.md).
+- Added checked API wrappers with clearer error codes for size/pointer validation.
+- Added build profiles: PORTABLE (default), HARDEN, and SANITIZE.
+- Added SIZE build profile (uses -Os and -DBLAKE2_NO_UNROLLING).
+- Strengthened crypto_wipe with platform secure zeroization when available.
+- Added crypto_random OS-backed RNG helper.
+- Added libFuzzer and AFL harnesses for AEAD, X25519, EdDSA, and Argon2.
 
 
 4.0.2

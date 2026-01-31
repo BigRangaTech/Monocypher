@@ -111,6 +111,17 @@ void crypto_sha512_hkdf(uint8_t       *okm , size_t okm_size,
                         const uint8_t *salt, size_t salt_size,
                         const uint8_t *info, size_t info_size);
 
+// Checked SHA-512 interface
+int crypto_sha512_checked(uint8_t hash[64],
+                          const uint8_t *message, size_t message_size);
+int crypto_sha512_hmac_checked(uint8_t hmac[64],
+                               const uint8_t *key, size_t key_size,
+                               const uint8_t *message, size_t message_size);
+int crypto_sha512_hkdf_checked(uint8_t       *okm, size_t okm_size,
+                               const uint8_t *ikm, size_t ikm_size,
+                               const uint8_t *salt, size_t salt_size,
+                               const uint8_t *info, size_t info_size);
+
 // Ed25519
 // -------
 // Signatures (EdDSA with curve25519 + SHA-512)

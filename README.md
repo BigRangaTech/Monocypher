@@ -83,10 +83,19 @@ If you need the optional SHA-512 or Ed25519, grab
 Run `make`, then grab the `src/monocypher.h` header and either the
 `lib/libmonocypher.a` or `lib/libmonocypher.so` library.  The default
 compiler is `gcc -std=c99`, and the default flags are `-pedantic -Wall
--Wextra -O3 -march=native`.  If they don't work on your platform, you
-can change them like this:
+-Wextra -O3`.  If they don't work on your platform, you can change them
+like this:
 
     $ make CC="clang -std=c11" CFLAGS="-O2"
+
+Build profiles:
+
+- `PORTABLE=1` (default) disables `-march=native`. Set `PORTABLE=0` to
+  enable it for local builds.
+- `HARDEN=1` adds stack protector, FORTIFY, and relro/now flags.
+- `SANITIZE=address,undefined` builds with sanitizers. You can also use
+  the convenience targets: `make harden` and `make sanitize`.
+- `SIZE=1` builds with `-Os` and `-DBLAKE2_NO_UNROLLING` (smaller binaries).
 
 ### Option 3: install it on your system
 

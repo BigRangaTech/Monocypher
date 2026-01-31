@@ -53,7 +53,7 @@
 .SUFFIXES:
 
 CC           ?= gcc -std=c99
-CFLAGS       ?= -pedantic -Wall -Wextra -O3 -march=native
+CFLAGS       ?= -pedantic -Wall -Wextra -O3
 DESTDIR      ?=
 PREFIX       ?= /usr/local
 LIBDIR       ?= $(PREFIX)/lib
@@ -61,10 +61,32 @@ INCLUDEDIR   ?= $(PREFIX)/include
 PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
 MANDIR       ?= $(PREFIX)/share/man/man3
 SONAME        = libmonocypher.so.4
+PORTABLE     ?= 1
+HARDEN       ?= 0
+SANITIZE     ?=
+SIZE         ?= 0
+
+ifeq ($(PORTABLE),0)
+CFLAGS       += -march=native
+endif
+
+ifeq ($(HARDEN),1)
+CFLAGS       += -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fno-omit-frame-pointer
+LDFLAGS      += -Wl,-z,relro -Wl,-z,now
+endif
+
+ifneq ($(SANITIZE),)
+CFLAGS       += -fsanitize=$(SANITIZE)
+LDFLAGS      += -fsanitize=$(SANITIZE)
+endif
+
+ifeq ($(SIZE),1)
+CFLAGS       += -Os -DBLAKE2_NO_UNROLLING
+endif
 
 .PHONY: all library static-library dynamic-library  \
         install install-lib install-pc install-doc  \
-        check test tis-ci ctgrind                   \
+        check test tis-ci ctgrind harden sanitize size \
         clean uninstall dist
 
 ##################
@@ -81,6 +103,15 @@ tis-ci: tis-ci.out
 
 ctgrind: ctgrind.out
 	valgrind ./ctgrind.out
+
+harden:
+	$(MAKE) HARDEN=1
+
+sanitize:
+	$(MAKE) SANITIZE=address,undefined
+
+size:
+	$(MAKE) SIZE=1
 
 clean:
 	rm -rf lib/ doc/html/ doc/man3/
