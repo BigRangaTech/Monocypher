@@ -65,6 +65,9 @@ PORTABLE     ?= 1
 HARDEN       ?= 0
 SANITIZE     ?=
 SIZE         ?= 0
+ARGON2_THREADS ?= 0
+BLAKE3_THREADS ?= 0
+CHACHA20_THREADS ?= 0
 
 ifeq ($(PORTABLE),0)
 CFLAGS       += -march=native
@@ -82,6 +85,21 @@ endif
 
 ifeq ($(SIZE),1)
 CFLAGS       += -Os -DBLAKE2_NO_UNROLLING
+endif
+
+ifeq ($(ARGON2_THREADS),1)
+CFLAGS       += -DMONOCYPHER_ARGON2_PTHREADS=1 -pthread
+LDFLAGS      += -pthread
+endif
+
+ifeq ($(BLAKE3_THREADS),1)
+CFLAGS       += -DMONOCYPHER_BLAKE3_PTHREADS=1 -pthread
+LDFLAGS      += -pthread
+endif
+
+ifeq ($(CHACHA20_THREADS),1)
+CFLAGS       += -DMONOCYPHER_CHACHA20_PTHREADS=1 -pthread
+LDFLAGS      += -pthread
 endif
 
 .PHONY: all library static-library dynamic-library  \

@@ -53,7 +53,14 @@
 
 #include "monocypher.h"
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
+#if ((defined(MONOCYPHER_ARGON2_PTHREADS) && MONOCYPHER_ARGON2_PTHREADS) || \
+     (defined(MONOCYPHER_BLAKE3_PTHREADS) && MONOCYPHER_BLAKE3_PTHREADS) || \
+     (defined(MONOCYPHER_CHACHA20_PTHREADS) && MONOCYPHER_CHACHA20_PTHREADS)) \
+    && !defined(_WIN32)
+#include <pthread.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
@@ -250,8 +257,37 @@ static int neq0(u64 diff)
 	return (1 & ((half - 1) >> 32)) - 1;
 }
 
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+MONO_TARGET_SSE2
+static u64 x16_sse2(const u8 a[16], const u8 b[16])
+{
+	__m128i va = _mm_loadu_si128((const __m128i*)a);
+	__m128i vb = _mm_loadu_si128((const __m128i*)b);
+	__m128i v = _mm_xor_si128(va, vb);
+	v = _mm_or_si128(v, _mm_srli_si128(v, 8));
+	return (u64)_mm_cvtsi128_si64(v);
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static u64 x16_neon(const u8 a[16], const u8 b[16])
+{
+	uint8x16_t va = vld1q_u8(a);
+	uint8x16_t vb = vld1q_u8(b);
+	uint8x16_t v = veorq_u8(va, vb);
+	uint64x2_t lanes = vreinterpretq_u64_u8(v);
+	return vgetq_lane_u64(lanes, 0) | vgetq_lane_u64(lanes, 1);
+}
+#endif
+
 static u64 x16(const u8 a[16], const u8 b[16])
 {
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) { return x16_sse2(a, b); }
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) { return x16_neon(a, b); }
+#endif
 	return (load64_le(a + 0) ^ load64_le(b + 0))
 		|  (load64_le(a + 8) ^ load64_le(b + 8));
 }
@@ -358,16 +394,24 @@ static void chacha20_rounds(u32 out[16], const u32 in[16])
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #if defined(__GNUC__) || defined(__clang__)
 #define MONO_TARGET_SSE2 __attribute__((target("sse2")))
+#define MONO_TARGET_SSE41 __attribute__((target("sse4.1")))
 #define MONO_TARGET_AVX2 __attribute__((target("avx2")))
 #define MONO_HAS_AVX2 1
+#define MONO_HAS_SSE41 1
 #else
 #define MONO_TARGET_SSE2
+#define MONO_TARGET_SSE41
 #if defined(_MSC_VER) && defined(__AVX2__)
 #define MONO_TARGET_AVX2
 #define MONO_HAS_AVX2 1
 #else
 #define MONO_TARGET_AVX2
 #define MONO_HAS_AVX2 0
+#endif
+#if defined(_MSC_VER) && defined(__SSE4_1__)
+#define MONO_HAS_SSE41 1
+#else
+#define MONO_HAS_SSE41 0
 #endif
 #endif
 #if defined(__x86_64__) || defined(_M_X64)
@@ -407,6 +451,30 @@ static int mono_have_sse2_cached(void)
 	}
 	return cached;
 }
+
+#if MONO_HAS_SSE41
+static int mono_cpu_has_sse41(void)
+{
+#if defined(__GNUC__) || defined(__clang__)
+	return __builtin_cpu_supports("sse4.1");
+#elif defined(_MSC_VER)
+	int regs[4] = {0,0,0,0};
+	__cpuid(regs, 1);
+	return (regs[2] & (1 << 19)) != 0;
+#else
+	return 0;
+#endif
+}
+
+static int mono_have_sse41_cached(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		cached = mono_cpu_has_sse41();
+	}
+	return cached;
+}
+#endif
 
 #if MONO_HAS_AVX2
 static int mono_cpu_has_avx2(void)
@@ -560,6 +628,129 @@ static void chacha20_blocks4_sse2(u8 *cipher_text, const u8 *plain_text,
 	}
 #undef QR
 }
+
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
+static __m256i rotl32_avx2(__m256i v, int n)
+{
+	return _mm256_or_si256(_mm256_slli_epi32(v, n), _mm256_srli_epi32(v, 32 - n));
+}
+
+MONO_TARGET_AVX2
+static void chacha20_blocks8_avx2(u8 *cipher_text, const u8 *plain_text,
+                                  const u32 input[16], u64 ctr)
+{
+	u32 ctr_lo[8] = {
+		(u32)ctr, (u32)(ctr + 1), (u32)(ctr + 2), (u32)(ctr + 3),
+		(u32)(ctr + 4), (u32)(ctr + 5), (u32)(ctr + 6), (u32)(ctr + 7),
+	};
+	u32 ctr_hi[8] = {
+		(u32)(ctr >> 32), (u32)((ctr + 1) >> 32), (u32)((ctr + 2) >> 32),
+		(u32)((ctr + 3) >> 32), (u32)((ctr + 4) >> 32),
+		(u32)((ctr + 5) >> 32), (u32)((ctr + 6) >> 32),
+		(u32)((ctr + 7) >> 32),
+	};
+
+	__m256i v0  = _mm256_set1_epi32((i32)input[0]);
+	__m256i v1  = _mm256_set1_epi32((i32)input[1]);
+	__m256i v2  = _mm256_set1_epi32((i32)input[2]);
+	__m256i v3  = _mm256_set1_epi32((i32)input[3]);
+	__m256i v4  = _mm256_set1_epi32((i32)input[4]);
+	__m256i v5  = _mm256_set1_epi32((i32)input[5]);
+	__m256i v6  = _mm256_set1_epi32((i32)input[6]);
+	__m256i v7  = _mm256_set1_epi32((i32)input[7]);
+	__m256i v8  = _mm256_set1_epi32((i32)input[8]);
+	__m256i v9  = _mm256_set1_epi32((i32)input[9]);
+	__m256i v10 = _mm256_set1_epi32((i32)input[10]);
+	__m256i v11 = _mm256_set1_epi32((i32)input[11]);
+	__m256i v12 = _mm256_loadu_si256((const __m256i*)ctr_lo);
+	__m256i v13 = _mm256_loadu_si256((const __m256i*)ctr_hi);
+	__m256i v14 = _mm256_set1_epi32((i32)input[14]);
+	__m256i v15 = _mm256_set1_epi32((i32)input[15]);
+
+	const __m256i i0  = v0;  const __m256i i1  = v1;
+	const __m256i i2  = v2;  const __m256i i3  = v3;
+	const __m256i i4  = v4;  const __m256i i5  = v5;
+	const __m256i i6  = v6;  const __m256i i7  = v7;
+	const __m256i i8  = v8;  const __m256i i9  = v9;
+	const __m256i i10 = v10; const __m256i i11 = v11;
+	const __m256i i12 = v12; const __m256i i13 = v13;
+	const __m256i i14 = v14; const __m256i i15 = v15;
+
+#define QR(a,b,c,d)                            \
+	a = _mm256_add_epi32(a, b);               \
+	d = _mm256_xor_si256(d, a);               \
+	d = rotl32_avx2(d, 16);                   \
+	c = _mm256_add_epi32(c, d);               \
+	b = _mm256_xor_si256(b, c);               \
+	b = rotl32_avx2(b, 12);                   \
+	a = _mm256_add_epi32(a, b);               \
+	d = _mm256_xor_si256(d, a);               \
+	d = rotl32_avx2(d,  8);                   \
+	c = _mm256_add_epi32(c, d);               \
+	b = _mm256_xor_si256(b, c);               \
+	b = rotl32_avx2(b,  7)
+
+	for (int i = 0; i < 10; i++) {
+		QR(v0, v4, v8 , v12);
+		QR(v1, v5, v9 , v13);
+		QR(v2, v6, v10, v14);
+		QR(v3, v7, v11, v15);
+		QR(v0, v5, v10, v15);
+		QR(v1, v6, v11, v12);
+		QR(v2, v7, v8 , v13);
+		QR(v3, v4, v9 , v14);
+	}
+
+	v0  = _mm256_add_epi32(v0 , i0 );
+	v1  = _mm256_add_epi32(v1 , i1 );
+	v2  = _mm256_add_epi32(v2 , i2 );
+	v3  = _mm256_add_epi32(v3 , i3 );
+	v4  = _mm256_add_epi32(v4 , i4 );
+	v5  = _mm256_add_epi32(v5 , i5 );
+	v6  = _mm256_add_epi32(v6 , i6 );
+	v7  = _mm256_add_epi32(v7 , i7 );
+	v8  = _mm256_add_epi32(v8 , i8 );
+	v9  = _mm256_add_epi32(v9 , i9 );
+	v10 = _mm256_add_epi32(v10, i10);
+	v11 = _mm256_add_epi32(v11, i11);
+	v12 = _mm256_add_epi32(v12, i12);
+	v13 = _mm256_add_epi32(v13, i13);
+	v14 = _mm256_add_epi32(v14, i14);
+	v15 = _mm256_add_epi32(v15, i15);
+
+	u32 tmp[16][8];
+	_mm256_storeu_si256((__m256i*)tmp[0], v0);
+	_mm256_storeu_si256((__m256i*)tmp[1], v1);
+	_mm256_storeu_si256((__m256i*)tmp[2], v2);
+	_mm256_storeu_si256((__m256i*)tmp[3], v3);
+	_mm256_storeu_si256((__m256i*)tmp[4], v4);
+	_mm256_storeu_si256((__m256i*)tmp[5], v5);
+	_mm256_storeu_si256((__m256i*)tmp[6], v6);
+	_mm256_storeu_si256((__m256i*)tmp[7], v7);
+	_mm256_storeu_si256((__m256i*)tmp[8], v8);
+	_mm256_storeu_si256((__m256i*)tmp[9], v9);
+	_mm256_storeu_si256((__m256i*)tmp[10], v10);
+	_mm256_storeu_si256((__m256i*)tmp[11], v11);
+	_mm256_storeu_si256((__m256i*)tmp[12], v12);
+	_mm256_storeu_si256((__m256i*)tmp[13], v13);
+	_mm256_storeu_si256((__m256i*)tmp[14], v14);
+	_mm256_storeu_si256((__m256i*)tmp[15], v15);
+
+	for (int b = 0; b < 8; b++) {
+		u8 *out = cipher_text + (size_t)b * 64;
+		const u8 *in = plain_text ? (plain_text + (size_t)b * 64) : 0;
+		for (int i = 0; i < 16; i++) {
+			u32 w = tmp[i][b];
+			if (in) {
+				w ^= load32_le(in + (size_t)i * 4);
+			}
+			store32_le(out + (size_t)i * 4, w);
+		}
+	}
+#undef QR
+}
+#endif
 #endif
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -712,10 +903,43 @@ void crypto_chacha20_h(u8 out[32], const u8 key[32], const u8 in [16])
 	WIPE_BUFFER(block);
 }
 
-u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
-                        size_t text_size, const u8 key[32], const u8 nonce[8],
-                        u64 ctr)
+#define CHACHA20_THREAD_MIN_BLOCKS 64
+
+#if defined(MONOCYPHER_CHACHA20_PTHREADS) && MONOCYPHER_CHACHA20_PTHREADS && \
+    !defined(_WIN32)
+typedef struct {
+	u8 *cipher_text;
+	const u8 *plain_text;
+	size_t text_size;
+	const u8 *key;
+	const u8 *nonce;
+	u64 ctr;
+} chacha20_job;
+
+static u64 crypto_chacha20_djb_inner(u8 *cipher_text, const u8 *plain_text,
+                                     size_t text_size, const u8 key[32],
+                                     const u8 nonce[8], u64 ctr,
+                                     int allow_threads);
+
+static void *chacha20_thread_main(void *ptr)
 {
+	chacha20_job *job = (chacha20_job*)ptr;
+	crypto_chacha20_djb_inner(job->cipher_text, job->plain_text,
+	                          job->text_size, job->key, job->nonce,
+	                          job->ctr, 0);
+	return 0;
+}
+#endif
+
+static u64 crypto_chacha20_djb_inner(u8 *cipher_text, const u8 *plain_text,
+                                     size_t text_size, const u8 key[32],
+                                     const u8 nonce[8], u64 ctr,
+                                     int allow_threads)
+{
+#if !defined(MONOCYPHER_CHACHA20_PTHREADS) || !MONOCYPHER_CHACHA20_PTHREADS || \
+    defined(_WIN32)
+	(void)allow_threads;
+#endif
 	u32 input[16];
 	load32_le_buf(input     , chacha20_constant, 4);
 	load32_le_buf(input +  4, key              , 8);
@@ -726,17 +950,81 @@ u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
 	// Whole blocks
 	u32    pool[16];
 	size_t nb_blocks = text_size >> 6;
+	size_t tail      = text_size & 63;
 	u64 block_ctr = ctr;
+	size_t threaded_blocks = 0;
+
+#if defined(MONOCYPHER_CHACHA20_PTHREADS) && MONOCYPHER_CHACHA20_PTHREADS && \
+    !defined(_WIN32)
+		if (allow_threads && nb_blocks >= (CHACHA20_THREAD_MIN_BLOCKS * 2)) {
+			size_t thread_blocks = nb_blocks / 2;
+			size_t main_blocks = nb_blocks - thread_blocks;
+			size_t main_bytes = main_blocks * 64;
+			size_t thread_bytes = thread_blocks * 64;
+
+		chacha20_job job;
+		job.cipher_text = cipher_text + main_bytes;
+		job.plain_text = plain_text ? (plain_text + main_bytes) : 0;
+		job.text_size = thread_bytes;
+		job.key = key;
+		job.nonce = nonce;
+		job.ctr = ctr + (u64)main_blocks;
+
+		pthread_t thread;
+		int spawned = pthread_create(&thread, 0, chacha20_thread_main, &job) == 0;
+
+		// Process first half on this thread without spawning further workers.
+		crypto_chacha20_djb_inner(cipher_text, plain_text, main_bytes,
+		                          key, nonce, ctr, 0);
+
+		if (spawned) {
+			pthread_join(thread, 0);
+		} else {
+			crypto_chacha20_djb_inner(job.cipher_text, job.plain_text,
+			                          job.text_size, job.key, job.nonce,
+			                          job.ctr, 0);
+		}
+
+		threaded_blocks = main_blocks + thread_blocks;
+		nb_blocks = 0;
+		block_ctr = ctr + (u64)threaded_blocks;
+	}
+#endif
+
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	int use_avx2 = mono_have_avx2_cached();
+#else
+	int use_avx2 = 0;
+#endif
 #if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
-	int use_sse2 = chacha20_cpu_has_sse2();
+	int use_sse2 = mono_have_sse2_cached();
 #else
 	int use_sse2 = 0;
 #endif
 #if defined(__ARM_NEON) || defined(__aarch64__)
-	int use_neon = chacha20_cpu_has_neon();
+	int use_neon = mono_have_neon_cached();
 #else
 	int use_neon = 0;
 #endif
+	if (threaded_blocks != 0) {
+		cipher_text += threaded_blocks * 64;
+		if (plain_text != NULL) {
+			plain_text += threaded_blocks * 64;
+		}
+	}
+
+	while (nb_blocks >= 8 && use_avx2) {
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+		chacha20_blocks8_avx2(cipher_text, plain_text, input, block_ctr);
+#endif
+		cipher_text += 64 * 8;
+		if (plain_text != NULL) {
+			plain_text += 64 * 8;
+		}
+		block_ctr += 8;
+		nb_blocks -= 8;
+	}
+
 	while (nb_blocks >= 4 && (use_sse2 || use_neon)) {
 #if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
 		if (use_sse2) {
@@ -782,7 +1070,7 @@ u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
 			input[13]++;
 		}
 	}
-	text_size &= 63;
+	text_size = tail;
 
 	// Last (incomplete) block
 	if (text_size > 0) {
@@ -804,6 +1092,20 @@ u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
 	WIPE_BUFFER(pool);
 	WIPE_BUFFER(input);
 	return ctr;
+}
+
+u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
+                        size_t text_size, const u8 key[32], const u8 nonce[8],
+                        u64 ctr)
+{
+#if defined(MONOCYPHER_CHACHA20_PTHREADS) && MONOCYPHER_CHACHA20_PTHREADS && \
+    !defined(_WIN32)
+	return crypto_chacha20_djb_inner(cipher_text, plain_text, text_size,
+	                                 key, nonce, ctr, 1);
+#else
+	return crypto_chacha20_djb_inner(cipher_text, plain_text, text_size,
+	                                 key, nonce, ctr, 0);
+#endif
 }
 
 u32 crypto_chacha20_ietf(u8 *cipher_text, const u8 *plain_text,
@@ -940,41 +1242,42 @@ MONO_TARGET_AVX2
 static void poly_mul_sum4x2_avx2(const u64 s[4], const u32 r0[4],
                                  const u32 r1[4], u64 *out0, u64 *out1)
 {
-	u32 s_lo[8] = {
-		(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3],
-		(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3],
-	};
-	u32 s_hi[8] = {
-		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
-		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
-		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
-		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
-	};
-	u32 r[8] = {
-		r0[0], r0[1], r0[2], r0[3],
-		r1[0], r1[1], r1[2], r1[3],
-	};
-
-	__m256i vs_lo = _mm256_loadu_si256((const __m256i*)s_lo);
-	__m256i vr    = _mm256_loadu_si256((const __m256i*)r);
+	u32 s0 = (u32)s[0]; u32 s1 = (u32)s[1];
+	u32 s2 = (u32)s[2]; u32 s3 = (u32)s[3];
+	u32 sh0 = (u32)(s[0] >> 32); u32 sh1 = (u32)(s[1] >> 32);
+	u32 sh2 = (u32)(s[2] >> 32); u32 sh3 = (u32)(s[3] >> 32);
+	__m256i vs_lo = _mm256_setr_epi32(s0, s1, s2, s3, s0, s1, s2, s3);
+	__m256i vs_hi = _mm256_setr_epi32(sh0, sh1, sh2, sh3,
+	                                  sh0, sh1, sh2, sh3);
+	__m256i vr = _mm256_setr_epi32(r0[0], r0[1], r0[2], r0[3],
+	                               r1[0], r1[1], r1[2], r1[3]);
 	__m256i prod_even = _mm256_mul_epu32(vs_lo, vr);
 	__m256i prod_odd  = _mm256_mul_epu32(_mm256_srli_si256(vs_lo, 4),
 	                                     _mm256_srli_si256(vr, 4));
-	u64 pe[4];
-	u64 po[4];
-	_mm256_storeu_si256((__m256i*)pe, prod_even);
-	_mm256_storeu_si256((__m256i*)po, prod_odd);
-	u64 sum0 = pe[0] + po[0] + pe[1] + po[1];
-	u64 sum1 = pe[2] + po[2] + pe[3] + po[3];
+	__m128i pe_lo = _mm256_castsi256_si128(prod_even);
+	__m128i pe_hi = _mm256_extracti128_si256(prod_even, 1);
+	__m128i po_lo = _mm256_castsi256_si128(prod_odd);
+	__m128i po_hi = _mm256_extracti128_si256(prod_odd, 1);
+	__m128i sum0v = _mm_add_epi64(pe_lo, po_lo);
+	sum0v = _mm_add_epi64(sum0v, _mm_srli_si128(sum0v, 8));
+	u64 sum0 = (u64)_mm_cvtsi128_si64(sum0v);
+	__m128i sum1v = _mm_add_epi64(pe_hi, po_hi);
+	sum1v = _mm_add_epi64(sum1v, _mm_srli_si128(sum1v, 8));
+	u64 sum1 = (u64)_mm_cvtsi128_si64(sum1v);
 
-	__m256i vs_hi = _mm256_loadu_si256((const __m256i*)s_hi);
 	prod_even = _mm256_mul_epu32(vs_hi, vr);
 	prod_odd  = _mm256_mul_epu32(_mm256_srli_si256(vs_hi, 4),
 	                             _mm256_srli_si256(vr, 4));
-	_mm256_storeu_si256((__m256i*)pe, prod_even);
-	_mm256_storeu_si256((__m256i*)po, prod_odd);
-	u64 sum0_hi = pe[0] + po[0] + pe[1] + po[1];
-	u64 sum1_hi = pe[2] + po[2] + pe[3] + po[3];
+	pe_lo = _mm256_castsi256_si128(prod_even);
+	pe_hi = _mm256_extracti128_si256(prod_even, 1);
+	po_lo = _mm256_castsi256_si128(prod_odd);
+	po_hi = _mm256_extracti128_si256(prod_odd, 1);
+	sum0v = _mm_add_epi64(pe_lo, po_lo);
+	sum0v = _mm_add_epi64(sum0v, _mm_srli_si128(sum0v, 8));
+	u64 sum0_hi = (u64)_mm_cvtsi128_si64(sum0v);
+	sum1v = _mm_add_epi64(pe_hi, po_hi);
+	sum1v = _mm_add_epi64(sum1v, _mm_srli_si128(sum1v, 8));
+	u64 sum1_hi = (u64)_mm_cvtsi128_si64(sum1v);
 
 	*out0 = sum0 + (sum0_hi << 32);
 	*out1 = sum1 + (sum1_hi << 32);
@@ -985,54 +1288,50 @@ static void poly_mul_sum4x2_avx2(const u64 s[4], const u32 r0[4],
 MONO_TARGET_SSE2
 static u64 poly_mul_sum4_sse2(const u64 s[4], const u32 r[4])
 {
-	u32 s_lo[4] = {(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3]};
-	u32 s_hi[4] = {
-		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
-		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
-	};
-	__m128i vs_lo = _mm_loadu_si128((const __m128i*)s_lo);
+	u32 s0 = (u32)s[0]; u32 s1 = (u32)s[1];
+	u32 s2 = (u32)s[2]; u32 s3 = (u32)s[3];
+	u32 sh0 = (u32)(s[0] >> 32); u32 sh1 = (u32)(s[1] >> 32);
+	u32 sh2 = (u32)(s[2] >> 32); u32 sh3 = (u32)(s[3] >> 32);
+	__m128i vs_lo = _mm_setr_epi32(s0, s1, s2, s3);
 	__m128i vr    = _mm_loadu_si128((const __m128i*)r);
 	__m128i prod02 = _mm_mul_epu32(vs_lo, vr);
 	__m128i prod13 = _mm_mul_epu32(_mm_srli_si128(vs_lo, 4),
 	                               _mm_srli_si128(vr, 4));
-	u64 tmp0[2];
-	u64 tmp1[2];
-	_mm_storeu_si128((__m128i*)tmp0, prod02);
-	_mm_storeu_si128((__m128i*)tmp1, prod13);
-	u64 sum = tmp0[0] + tmp0[1] + tmp1[0] + tmp1[1];
+	__m128i sum = _mm_add_epi64(prod02, prod13);
+	sum = _mm_add_epi64(sum, _mm_srli_si128(sum, 8));
+	u64 sumv = (u64)_mm_cvtsi128_si64(sum);
 
-	__m128i vs_hi = _mm_loadu_si128((const __m128i*)s_hi);
+	__m128i vs_hi = _mm_setr_epi32(sh0, sh1, sh2, sh3);
 	__m128i prod02_hi = _mm_mul_epu32(vs_hi, vr);
 	__m128i prod13_hi = _mm_mul_epu32(_mm_srli_si128(vs_hi, 4),
 	                                  _mm_srli_si128(vr, 4));
-	_mm_storeu_si128((__m128i*)tmp0, prod02_hi);
-	_mm_storeu_si128((__m128i*)tmp1, prod13_hi);
-	u64 sum_hi = tmp0[0] + tmp0[1] + tmp1[0] + tmp1[1];
+	sum = _mm_add_epi64(prod02_hi, prod13_hi);
+	sum = _mm_add_epi64(sum, _mm_srli_si128(sum, 8));
+	u64 sum_hi = (u64)_mm_cvtsi128_si64(sum);
 
-	return sum + (sum_hi << 32);
+	return sumv + (sum_hi << 32);
 }
 #endif
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 static u64 poly_mul_sum4_neon(const u64 s[4], const u32 r[4])
 {
-	u32 s_lo[4] = {(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3]};
-	u32 s_hi[4] = {
-		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
-		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
-	};
-	uint32x4_t vs_lo = vld1q_u32(s_lo);
+	u32 s0 = (u32)s[0]; u32 s1 = (u32)s[1];
+	u32 s2 = (u32)s[2]; u32 s3 = (u32)s[3];
+	u32 sh0 = (u32)(s[0] >> 32); u32 sh1 = (u32)(s[1] >> 32);
+	u32 sh2 = (u32)(s[2] >> 32); u32 sh3 = (u32)(s[3] >> 32);
+	uint32x4_t vs_lo = (uint32x4_t){s0, s1, s2, s3};
 	uint32x4_t vr    = vld1q_u32(r);
 	uint64x2_t prod_lo = vmull_u32(vget_low_u32(vs_lo), vget_low_u32(vr));
 	uint64x2_t prod_hi = vmull_u32(vget_high_u32(vs_lo), vget_high_u32(vr));
-	u64 sum = vgetq_lane_u64(prod_lo, 0) + vgetq_lane_u64(prod_lo, 1) +
-	          vgetq_lane_u64(prod_hi, 0) + vgetq_lane_u64(prod_hi, 1);
+	uint64x2_t sumv = vaddq_u64(prod_lo, prod_hi);
+	u64 sum = vgetq_lane_u64(sumv, 0) + vgetq_lane_u64(sumv, 1);
 
-	uint32x4_t vs_hi = vld1q_u32(s_hi);
+	uint32x4_t vs_hi = (uint32x4_t){sh0, sh1, sh2, sh3};
 	prod_lo = vmull_u32(vget_low_u32(vs_hi), vget_low_u32(vr));
 	prod_hi = vmull_u32(vget_high_u32(vs_hi), vget_high_u32(vr));
-	u64 sum_hi = vgetq_lane_u64(prod_lo, 0) + vgetq_lane_u64(prod_lo, 1) +
-	             vgetq_lane_u64(prod_hi, 0) + vgetq_lane_u64(prod_hi, 1);
+	sumv = vaddq_u64(prod_lo, prod_hi);
+	u64 sum_hi = vgetq_lane_u64(sumv, 0) + vgetq_lane_u64(sumv, 1);
 
 	return sum + (sum_hi << 32);
 }
@@ -1063,6 +1362,28 @@ static void poly_blocks(crypto_poly1305_ctx *ctx, const u8 *in,
 	u32 h2 = ctx->h[2];
 	u32 h3 = ctx->h[3];
 	u32 h4 = ctx->h[4];
+	const u32 r_vec0[4] = {r0, rr3, rr2, rr1};
+	const u32 r_vec1[4] = {r1, r0 , rr3, rr2};
+	const u32 r_vec2[4] = {r2, r1 , r0 , rr3};
+	const u32 r_vec3[4] = {r3, r2 , r1 , r0 };
+	int poly_simd = 0;
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		poly_simd = 2;
+	} else
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		poly_simd = 1;
+	}
+#endif
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (poly_simd == 0 && mono_have_neon_cached()) {
+		poly_simd = 3;
+	}
+#endif
 
 	FOR (i, 0, nb_blocks) {
 		u32 m[4];
@@ -1081,39 +1402,26 @@ static void poly_blocks(crypto_poly1305_ctx *ctx, const u8 *in,
 		u64 x2 = 0;
 		u64 x3 = 0;
 		const u64 s_vec[4] = {s0, s1, s2, s3};
-		const u32 r_vec0[4] = {r0, rr3, rr2, rr1};
-		const u32 r_vec1[4] = {r1, r0 , rr3, rr2};
-		const u32 r_vec2[4] = {r2, r1 , r0 , rr3};
-		const u32 r_vec3[4] = {r3, r2 , r1 , r0 };
-		int simd_done = 0;
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+		if (poly_simd == 2) {
 #if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
-		if (mono_have_avx2_cached()) {
 			poly_mul_sum4x2_avx2(s_vec, r_vec0, r_vec1, &x0, &x1);
 			poly_mul_sum4x2_avx2(s_vec, r_vec2, r_vec3, &x2, &x3);
-			simd_done = 1;
-		} else
 #endif
+		} else if (poly_simd == 1) {
 #if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
-		if (mono_have_sse2_cached()) {
 			x0 = poly_mul_sum4_sse2(s_vec, r_vec0);
 			x1 = poly_mul_sum4_sse2(s_vec, r_vec1);
 			x2 = poly_mul_sum4_sse2(s_vec, r_vec2);
 			x3 = poly_mul_sum4_sse2(s_vec, r_vec3);
-			simd_done = 1;
-		}
 #endif
-#endif
+		} else if (poly_simd == 3) {
 #if defined(__ARM_NEON) || defined(__aarch64__)
-		if (!simd_done && mono_have_neon_cached()) {
 			x0 = poly_mul_sum4_neon(s_vec, r_vec0);
 			x1 = poly_mul_sum4_neon(s_vec, r_vec1);
 			x2 = poly_mul_sum4_neon(s_vec, r_vec2);
 			x3 = poly_mul_sum4_neon(s_vec, r_vec3);
-			simd_done = 1;
-		}
 #endif
-		if (!simd_done) {
+		} else {
 			x0 = poly_mul_sum4_scalar(s_vec, r_vec0);
 			x1 = poly_mul_sum4_scalar(s_vec, r_vec1);
 			x2 = poly_mul_sum4_scalar(s_vec, r_vec2);
@@ -1742,6 +2050,7 @@ int crypto_sha256_hkdf_checked(u8 *okm, size_t okm_size,
 #define BLAKE3_MAX_DEPTH 54
 #define BLAKE3_MAX_SIMD_DEGREE 1
 #define BLAKE3_MAX_SIMD_DEGREE_OR_2 2
+#define BLAKE3_THREAD_MIN_LEN (4 * BLAKE3_CHUNK_LEN)
 
 enum blake3_flags {
 	BLAKE3_CHUNK_START         = 1 << 0,
@@ -2179,11 +2488,47 @@ static size_t blake3_compress_parents_parallel(const u8 *child_cvs,
 	return parents_array_len;
 }
 
-static size_t blake3_compress_subtree_wide(const u8 *input, size_t input_len,
-                                           const u32 key[8],
-                                           u64 chunk_counter, u8 flags,
-                                           u8 *out)
+#if defined(MONOCYPHER_BLAKE3_PTHREADS) && MONOCYPHER_BLAKE3_PTHREADS && \
+    !defined(_WIN32)
+typedef struct {
+	const u8 *input;
+	size_t input_len;
+	const u32 *key;
+	u64 chunk_counter;
+	u8 flags;
+	u8 *out;
+	size_t out_n;
+} blake3_subtree_job;
+
+static size_t blake3_compress_subtree_wide_inner(const u8 *input,
+                                                 size_t input_len,
+                                                 const u32 key[8],
+                                                 u64 chunk_counter, u8 flags,
+                                                 u8 *out, int allow_threads);
+
+static void *blake3_subtree_thread_main(void *ptr)
 {
+	blake3_subtree_job *job = (blake3_subtree_job*)ptr;
+	job->out_n = blake3_compress_subtree_wide_inner(job->input,
+	                                               job->input_len,
+	                                               job->key,
+	                                               job->chunk_counter,
+	                                               job->flags,
+	                                               job->out, 0);
+	return 0;
+}
+#endif
+
+static size_t blake3_compress_subtree_wide_inner(const u8 *input,
+                                                 size_t input_len,
+                                                 const u32 key[8],
+                                                 u64 chunk_counter, u8 flags,
+                                                 u8 *out, int allow_threads)
+{
+#if !defined(MONOCYPHER_BLAKE3_PTHREADS) || !MONOCYPHER_BLAKE3_PTHREADS || \
+    defined(_WIN32)
+	(void)allow_threads;
+#endif
 	if (input_len <= blake3_simd_degree() * BLAKE3_CHUNK_LEN) {
 		return blake3_compress_chunks_parallel(input, input_len, key,
 		                                       chunk_counter, flags, out);
@@ -2202,11 +2547,52 @@ static size_t blake3_compress_subtree_wide(const u8 *input, size_t input_len,
 	}
 	u8 *right_cvs = &cv_array[degree * BLAKE3_OUT_LEN];
 
-	size_t left_n = blake3_compress_subtree_wide(input, left_input_len, key,
-	                                             chunk_counter, flags, cv_array);
-	size_t right_n = blake3_compress_subtree_wide(right_input, right_input_len,
-	                                              key, right_chunk_counter,
-	                                              flags, right_cvs);
+	size_t left_n = 0;
+	size_t right_n = 0;
+#if defined(MONOCYPHER_BLAKE3_PTHREADS) && MONOCYPHER_BLAKE3_PTHREADS && \
+    !defined(_WIN32)
+	if (allow_threads &&
+	    input_len >= BLAKE3_THREAD_MIN_LEN &&
+	    left_input_len >= BLAKE3_CHUNK_LEN &&
+	    right_input_len >= BLAKE3_CHUNK_LEN) {
+		blake3_subtree_job job;
+		job.input = input;
+		job.input_len = left_input_len;
+		job.key = key;
+		job.chunk_counter = chunk_counter;
+		job.flags = flags;
+		job.out = cv_array;
+		job.out_n = 0;
+		pthread_t thread;
+		if (pthread_create(&thread, 0, blake3_subtree_thread_main, &job) == 0) {
+			right_n = blake3_compress_subtree_wide_inner(right_input,
+			                                             right_input_len,
+			                                             key,
+			                                             right_chunk_counter,
+			                                             flags, right_cvs, 0);
+			pthread_join(thread, 0);
+			left_n = job.out_n;
+		} else {
+			left_n = blake3_compress_subtree_wide_inner(input, left_input_len,
+			                                            key, chunk_counter,
+			                                            flags, cv_array, 0);
+			right_n = blake3_compress_subtree_wide_inner(right_input,
+			                                             right_input_len,
+			                                             key,
+			                                             right_chunk_counter,
+			                                             flags, right_cvs, 0);
+		}
+	} else
+#endif
+	{
+		left_n = blake3_compress_subtree_wide_inner(input, left_input_len, key,
+		                                            chunk_counter, flags,
+		                                            cv_array, 0);
+		right_n = blake3_compress_subtree_wide_inner(right_input,
+		                                             right_input_len, key,
+		                                             right_chunk_counter,
+		                                             flags, right_cvs, 0);
+	}
 
 	if (left_n == 1) {
 		COPY(out, cv_array, 2 * BLAKE3_OUT_LEN);
@@ -2216,6 +2602,15 @@ static size_t blake3_compress_subtree_wide(const u8 *input, size_t input_len,
 	size_t num_chaining_values = left_n + right_n;
 	return blake3_compress_parents_parallel(cv_array, num_chaining_values, key,
 	                                        flags, out);
+}
+
+static size_t blake3_compress_subtree_wide(const u8 *input, size_t input_len,
+                                           const u32 key[8],
+                                           u64 chunk_counter, u8 flags,
+                                           u8 *out)
+{
+	return blake3_compress_subtree_wide_inner(input, input_len, key,
+	                                          chunk_counter, flags, out, 1);
 }
 
 static void blake3_compress_subtree_to_parent_node(const u8 *input,
@@ -2574,6 +2969,110 @@ static void g_rounds(blk *b)
 
 const crypto_argon2_extras crypto_argon2_no_extras = { 0, 0, 0, 0 };
 
+typedef struct {
+	blk *blocks;
+	u32 lane_size;
+	u32 segment_size;
+	u32 nb_blocks;
+	crypto_argon2_config config;
+	u32 pass;
+	u32 slice;
+	int constant_time;
+	u32 pass_offset;
+	u32 slice_offset;
+	u32 lane;
+} argon2_segment_ctx;
+
+static void argon2_fill_segment(const argon2_segment_ctx *ctx)
+{
+	blk index_block;
+	u32 index_ctr = 1;
+	blk tmp;
+
+	FOR_T (u32, block, ctx->pass_offset, ctx->segment_size) {
+		// Current and previous blocks
+		u32  lane_offset   = ctx->lane * ctx->lane_size;
+		blk *segment_start = ctx->blocks + lane_offset + ctx->slice_offset;
+		blk *current       = segment_start + block;
+		blk *previous      =
+			block == 0 && ctx->slice_offset == 0
+			? segment_start + ctx->lane_size - 1
+			: segment_start + block - 1;
+
+		u64 index_seed;
+		if (ctx->constant_time) {
+			if (block == ctx->pass_offset || (block % 128) == 0) {
+				// Fill or refresh deterministic indices block
+
+				// seed the beginning of the block...
+				ZERO(index_block.a, 128);
+				index_block.a[0] = ctx->pass;
+				index_block.a[1] = ctx->lane;
+				index_block.a[2] = ctx->slice;
+				index_block.a[3] = ctx->nb_blocks;
+				index_block.a[4] = ctx->config.nb_passes;
+				index_block.a[5] = ctx->config.algorithm;
+				index_block.a[6] = index_ctr;
+				index_ctr++;
+
+				// ... then shuffle it
+				copy_block(&tmp, &index_block);
+				g_rounds  (&index_block);
+				xor_block (&index_block, &tmp);
+				copy_block(&tmp, &index_block);
+				g_rounds  (&index_block);
+				xor_block (&index_block, &tmp);
+			}
+			index_seed = index_block.a[block % 128];
+		} else {
+			index_seed = previous->a[0];
+		}
+
+		// Establish the reference set.  *Approximately* comprises:
+		// - The last 3 slices (if they exist yet)
+		// - The already constructed blocks in the current segment
+		u32 next_slice   = ((ctx->slice + 1) % 4) * ctx->segment_size;
+		u32 window_start = ctx->pass == 0 ? 0     : next_slice;
+		u32 nb_segments  = ctx->pass == 0 ? ctx->slice : 3;
+		u32 ref_lane     =
+			ctx->pass == 0 && ctx->slice == 0
+			? ctx->lane
+			: (index_seed >> 32) % ctx->config.nb_lanes;
+		u32 window_size  =
+			nb_segments * ctx->segment_size +
+			(ref_lane == ctx->lane ? block - 1 :
+			 block == 0          ? (u32)-1 : 0);
+
+		// Find reference block
+		u64  j1        = index_seed & 0xffffffff; // block selector
+		u64  x         = (j1 * j1)         >> 32;
+		u64  y         = (window_size * x) >> 32;
+		u64  z         = (window_size - 1) - y;
+		u32  ref       = (window_start + z) % ctx->lane_size;
+		u32  index     = ref_lane * ctx->lane_size + ref;
+		blk *reference = ctx->blocks + index;
+
+		// Shuffle the previous & reference block into the current block
+		copy_block(&tmp, previous);
+		xor_block (&tmp, reference);
+		if (ctx->pass == 0) { copy_block(current, &tmp); }
+		else                { xor_block (current, &tmp); }
+		g_rounds  (&tmp);
+		xor_block (current, &tmp);
+	}
+
+	volatile u64 *p = tmp.a;
+	ZERO(p, 128);
+}
+
+#if defined(MONOCYPHER_ARGON2_PTHREADS) && MONOCYPHER_ARGON2_PTHREADS && !defined(_WIN32)
+static void *argon2_thread_main(void *ptr)
+{
+	argon2_fill_segment((const argon2_segment_ctx*)ptr);
+	return 0;
+}
+#endif
+
 void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
                    crypto_argon2_config config,
                    crypto_argon2_inputs inputs,
@@ -2621,14 +3120,19 @@ void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
 
 	// Fill (and re-fill) the rest of the blocks
 	//
-	// Note: even though each segment within the same slice can be
-	// computed in parallel, (one thread per lane), we are computing
-	// them sequentially, because Monocypher doesn't support threads.
-	//
-	// Yet optimal performance (and therefore security) requires one
-	// thread per lane. The only reason Monocypher supports multiple
-	// lanes is compatibility.
-	blk tmp;
+#if defined(MONOCYPHER_ARGON2_PTHREADS) && MONOCYPHER_ARGON2_PTHREADS && !defined(_WIN32)
+	pthread_t *threads = 0;
+	argon2_segment_ctx *jobs = 0;
+	int have_threads = 0;
+	if (config.nb_lanes > 1) {
+		threads = (pthread_t*)malloc((size_t)config.nb_lanes * sizeof(*threads));
+		jobs = (argon2_segment_ctx*)malloc((size_t)config.nb_lanes * sizeof(*jobs));
+		if (threads != 0 && jobs != 0) {
+			have_threads = 1;
+		}
+	}
+#endif
+
 	FOR_T(u32, pass, 0, config.nb_passes) {
 		FOR_T(u32, slice, 0, 4) {
 			// On the first slice of the first pass,
@@ -2642,91 +3146,58 @@ void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
 				constant_time = 0;
 			}
 
-			// Each iteration of the following loop may be performed in
-			// a separate thread.  All segments must be fully completed
-			// before we start filling the next slice.
-			FOR_T(u32, segment, 0, config.nb_lanes) {
-				blk index_block;
-				u32 index_ctr = 1;
-				FOR_T (u32, block, pass_offset, segment_size) {
-					// Current and previous blocks
-					u32  lane_offset   = segment * lane_size;
-					blk *segment_start = blocks + lane_offset + slice_offset;
-					blk *current       = segment_start + block;
-					blk *previous      =
-						block == 0 && slice_offset == 0
-						? segment_start + lane_size - 1
-						: segment_start + block - 1;
+			// Each lane segment in this slice may be computed in parallel.
+			argon2_segment_ctx base;
+			base.blocks        = blocks;
+			base.lane_size     = lane_size;
+			base.segment_size  = segment_size;
+			base.nb_blocks     = nb_blocks;
+			base.config        = config;
+			base.pass          = pass;
+			base.slice         = slice;
+			base.constant_time = constant_time;
+			base.pass_offset   = pass_offset;
+			base.slice_offset  = slice_offset;
 
-					u64 index_seed;
-					if (constant_time) {
-						if (block == pass_offset || (block % 128) == 0) {
-							// Fill or refresh deterministic indices block
-
-							// seed the beginning of the block...
-							ZERO(index_block.a, 128);
-							index_block.a[0] = pass;
-							index_block.a[1] = segment;
-							index_block.a[2] = slice;
-							index_block.a[3] = nb_blocks;
-							index_block.a[4] = config.nb_passes;
-							index_block.a[5] = config.algorithm;
-							index_block.a[6] = index_ctr;
-							index_ctr++;
-
-							// ... then shuffle it
-							copy_block(&tmp, &index_block);
-							g_rounds  (&index_block);
-							xor_block (&index_block, &tmp);
-							copy_block(&tmp, &index_block);
-							g_rounds  (&index_block);
-							xor_block (&index_block, &tmp);
-						}
-						index_seed = index_block.a[block % 128];
-					} else {
-						index_seed = previous->a[0];
+#if defined(MONOCYPHER_ARGON2_PTHREADS) && MONOCYPHER_ARGON2_PTHREADS && !defined(_WIN32)
+			if (have_threads) {
+				u32 created = 0;
+				u32 lane = 0;
+				int failed = 0;
+				for (; lane < config.nb_lanes; lane++) {
+					jobs[lane] = base;
+					jobs[lane].lane = lane;
+					if (pthread_create(&threads[lane], 0,
+					                   argon2_thread_main, &jobs[lane]) != 0) {
+						failed = 1;
+						break;
 					}
-
-					// Establish the reference set.  *Approximately* comprises:
-					// - The last 3 slices (if they exist yet)
-					// - The already constructed blocks in the current segment
-					u32 next_slice   = ((slice + 1) % 4) * segment_size;
-					u32 window_start = pass == 0 ? 0     : next_slice;
-					u32 nb_segments  = pass == 0 ? slice : 3;
-					u32 lane         =
-						pass == 0 && slice == 0
-						? segment
-						: (index_seed >> 32) % config.nb_lanes;
-					u32 window_size  =
-						nb_segments * segment_size +
-						(lane  == segment ? block-1 :
-						 block == 0       ? (u32)-1 : 0);
-
-					// Find reference block
-					u64  j1        = index_seed & 0xffffffff; // block selector
-					u64  x         = (j1 * j1)         >> 32;
-					u64  y         = (window_size * x) >> 32;
-					u64  z         = (window_size - 1) - y;
-					u32  ref       = (window_start + z) % lane_size;
-					u32  index     = lane * lane_size + ref;
-					blk *reference = blocks + index;
-
-					// Shuffle the previous & reference block
-					// into the current block
-					copy_block(&tmp, previous);
-					xor_block (&tmp, reference);
-					if (pass == 0) { copy_block(current, &tmp); }
-					else           { xor_block (current, &tmp); }
-					g_rounds  (&tmp);
-					xor_block (current, &tmp);
+					created++;
+				}
+				if (failed) {
+					jobs[lane] = base;
+					jobs[lane].lane = lane;
+					argon2_fill_segment(&jobs[lane]);
+					for (u32 l = lane + 1; l < config.nb_lanes; l++) {
+						jobs[l] = base;
+						jobs[l].lane = l;
+						argon2_fill_segment(&jobs[l]);
+					}
+				}
+				for (u32 i = 0; i < created; i++) {
+					pthread_join(threads[i], 0);
+				}
+			} else
+#endif
+			{
+				FOR_T(u32, lane, 0, config.nb_lanes) {
+					argon2_segment_ctx ctx = base;
+					ctx.lane = lane;
+					argon2_fill_segment(&ctx);
 				}
 			}
 		}
 	}
-
-	// Wipe temporary block
-	volatile u64* p = tmp.a;
-	ZERO(p, 128);
 
 	// XOR last blocks of each lane
 	blk *last_block = blocks + lane_size - 1;
@@ -2741,12 +3212,17 @@ void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
 	store64_le_buf(final_block, last_block->a, 128);
 
 	// Wipe work area
-	p = (u64*)work_area;
+	volatile u64* p = (u64*)work_area;
 	ZERO(p, 128 * nb_blocks);
 
 	// Hash the very last block with H' into the output hash
 	extended_hash(hash, hash_size, final_block, 1024);
 	WIPE_BUFFER(final_block);
+
+#if defined(MONOCYPHER_ARGON2_PTHREADS) && MONOCYPHER_ARGON2_PTHREADS && !defined(_WIN32)
+	if (threads != 0) { free(threads); }
+	if (jobs != 0) { free(jobs); }
+#endif
 }
 
 int crypto_argon2_checked(u8 *hash, u32 hash_size,
@@ -3140,24 +3616,77 @@ static void fe_cswap(fe f, fe g, int b)
 	}
 }
 
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
+static void fe_ccopy_avx2(fe f, const fe g, int b)
+{
+	i32 mask = -b; // -1 = 0xffffffff
+	__m256i m = _mm256_set1_epi32(mask);
+	int i = 0;
+	for (; i + 7 < 10; i += 8) {
+		__m256i vf = _mm256_loadu_si256((const __m256i*)&f[i]);
+		__m256i vg = _mm256_loadu_si256((const __m256i*)&g[i]);
+		__m256i x = _mm256_and_si256(_mm256_xor_si256(vf, vg), m);
+		vf = _mm256_xor_si256(vf, x);
+		_mm256_storeu_si256((__m256i*)&f[i], vf);
+	}
+	for (; i < 10; i++) {
+		i32 x = (f[i] ^ g[i]) & mask;
+		f[i] = f[i] ^ x;
+	}
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static void fe_ccopy_neon(fe f, const fe g, int b)
+{
+	i32 mask = -b; // -1 = 0xffffffff
+	int32x4_t m = vdupq_n_s32(mask);
+	int i = 0;
+	for (; i + 3 < 10; i += 4) {
+		int32x4_t vf = vld1q_s32(&f[i]);
+		int32x4_t vg = vld1q_s32(&g[i]);
+		int32x4_t x = vandq_s32(veorq_s32(vf, vg), m);
+		vf = veorq_s32(vf, x);
+		vst1q_s32(&f[i], vf);
+	}
+	for (; i < 10; i++) {
+		i32 x = (f[i] ^ g[i]) & mask;
+		f[i] = f[i] ^ x;
+	}
+}
+#endif
+
 static void fe_ccopy(fe f, const fe g, int b)
 {
 	i32 mask = -b; // -1 = 0xffffffff
 #if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
 	if (mono_have_avx2_cached()) {
-		__m256i m = _mm256_set1_epi32(mask);
+		fe_ccopy_avx2(f, g, b);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		__m128i m = _mm_set1_epi32(mask);
 		int i = 0;
-		for (; i + 7 < 10; i += 8) {
-			__m256i vf = _mm256_loadu_si256((const __m256i*)&f[i]);
-			__m256i vg = _mm256_loadu_si256((const __m256i*)&g[i]);
-			__m256i x = _mm256_and_si256(_mm256_xor_si256(vf, vg), m);
-			vf = _mm256_xor_si256(vf, x);
-			_mm256_storeu_si256((__m256i*)&f[i], vf);
+		for (; i + 3 < 10; i += 4) {
+			__m128i vf = _mm_loadu_si128((const __m128i*)&f[i]);
+			__m128i vg = _mm_loadu_si128((const __m128i*)&g[i]);
+			__m128i x = _mm_and_si128(_mm_xor_si128(vf, vg), m);
+			vf = _mm_xor_si128(vf, x);
+			_mm_storeu_si128((__m128i*)&f[i], vf);
 		}
 		for (; i < 10; i++) {
 			i32 x = (f[i] ^ g[i]) & mask;
 			f[i] = f[i] ^ x;
 		}
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		fe_ccopy_neon(f, g, b);
 		return;
 	}
 #endif
@@ -3376,24 +3905,108 @@ static void fe_tobytes(u8 s[32], const fe h)
 //
 //   |g0|, |g2|, |g4|, |g6|, |g8|  <  1.65 * 2^26
 //   |g1|, |g3|, |g5|, |g7|, |g9|  <  1.65 * 2^25
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
+static void fe_mul_small_avx2(fe h, const fe f, i32 g)
+{
+	__m256i vg = _mm256_set1_epi32(g);
+	__m256i vf = _mm256_loadu_si256((const __m256i*)f);
+	__m256i prod_even = _mm256_mul_epi32(vf, vg);
+	__m256i vf_odd = _mm256_srli_si256(vf, 4);
+	__m256i prod_odd = _mm256_mul_epi32(vf_odd, vg);
+	__m128i even_lo = _mm256_castsi256_si128(prod_even);
+	__m128i even_hi = _mm256_extracti128_si256(prod_even, 1);
+	__m128i odd_lo  = _mm256_castsi256_si128(prod_odd);
+	__m128i odd_hi  = _mm256_extracti128_si256(prod_odd, 1);
+	i64 t0 = (i64)_mm_cvtsi128_si64(even_lo);
+	i64 t2 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(even_lo, even_lo));
+	i64 t4 = (i64)_mm_cvtsi128_si64(even_hi);
+	i64 t6 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(even_hi, even_hi));
+	i64 t1 = (i64)_mm_cvtsi128_si64(odd_lo);
+	i64 t3 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(odd_lo, odd_lo));
+	i64 t5 = (i64)_mm_cvtsi128_si64(odd_hi);
+	i64 t7 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(odd_hi, odd_hi));
+	i64 t8 = f[8] * (i64)g;
+	i64 t9 = f[9] * (i64)g;
+	// |t0|, |t2|, |t4|, |t6|, |t8|  <  1.65 * 2^26 * 2^31  < 2^58
+	// |t1|, |t3|, |t5|, |t7|, |t9|  <  1.65 * 2^25 * 2^31  < 2^57
+
+	FE_CARRY; // Carry precondition OK
+}
+#endif
+
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+MONO_TARGET_SSE41
+static void fe_mul_small_sse41(fe h, const fe f, i32 g)
+{
+	__m128i vg = _mm_set1_epi32(g);
+	__m128i vf0 = _mm_loadu_si128((const __m128i*)&f[0]);
+	__m128i vf1 = _mm_loadu_si128((const __m128i*)&f[4]);
+	__m128i prod0 = _mm_mul_epi32(vf0, vg);
+	__m128i prod1 = _mm_mul_epi32(_mm_srli_si128(vf0, 4),
+	                              _mm_srli_si128(vg, 4));
+	__m128i prod2 = _mm_mul_epi32(vf1, vg);
+	__m128i prod3 = _mm_mul_epi32(_mm_srli_si128(vf1, 4),
+	                              _mm_srli_si128(vg, 4));
+	i64 t0 = (i64)_mm_cvtsi128_si64(prod0);
+	i64 t2 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(prod0, prod0));
+	i64 t1 = (i64)_mm_cvtsi128_si64(prod1);
+	i64 t3 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(prod1, prod1));
+	i64 t4 = (i64)_mm_cvtsi128_si64(prod2);
+	i64 t6 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(prod2, prod2));
+	i64 t5 = (i64)_mm_cvtsi128_si64(prod3);
+	i64 t7 = (i64)_mm_cvtsi128_si64(_mm_unpackhi_epi64(prod3, prod3));
+	i64 t8 = f[8] * (i64)g;
+	i64 t9 = f[9] * (i64)g;
+
+	FE_CARRY; // Carry precondition OK
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static void fe_mul_small_neon(fe h, const fe f, i32 g)
+{
+	int32x2_t vg = vdup_n_s32(g);
+	int32x4_t vf0 = vld1q_s32(&f[0]);
+	int32x4_t vf1 = vld1q_s32(&f[4]);
+	int64x2_t prod0 = vmull_s32(vget_low_s32(vf0), vg);
+	int64x2_t prod1 = vmull_s32(vget_high_s32(vf0), vg);
+	int64x2_t prod2 = vmull_s32(vget_low_s32(vf1), vg);
+	int64x2_t prod3 = vmull_s32(vget_high_s32(vf1), vg);
+	i64 t0 = vgetq_lane_s64(prod0, 0);
+	i64 t1 = vgetq_lane_s64(prod0, 1);
+	i64 t2 = vgetq_lane_s64(prod1, 0);
+	i64 t3 = vgetq_lane_s64(prod1, 1);
+	i64 t4 = vgetq_lane_s64(prod2, 0);
+	i64 t5 = vgetq_lane_s64(prod2, 1);
+	i64 t6 = vgetq_lane_s64(prod3, 0);
+	i64 t7 = vgetq_lane_s64(prod3, 1);
+	i64 t8 = f[8] * (i64)g;
+	i64 t9 = f[9] * (i64)g;
+	// |t0|, |t2|, |t4|, |t6|, |t8|  <  1.65 * 2^26 * 2^31  < 2^58
+	// |t1|, |t3|, |t5|, |t7|, |t9|  <  1.65 * 2^25 * 2^31  < 2^57
+
+	FE_CARRY; // Carry precondition OK
+}
+#endif
+
 static void fe_mul_small(fe h, const fe f, i32 g)
 {
 #if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
 	if (mono_have_avx2_cached()) {
-		__m256i vg = _mm256_set1_epi32(g);
-		__m256i vf = _mm256_loadu_si256((const __m256i*)f);
-		__m256i prod_even = _mm256_mul_epi32(vf, vg);
-		__m256i vf_odd = _mm256_srli_si256(vf, 4);
-		__m256i prod_odd = _mm256_mul_epi32(vf_odd, vg);
-		i64 even[4];
-		i64 odd[4];
-		_mm256_storeu_si256((__m256i*)even, prod_even);
-		_mm256_storeu_si256((__m256i*)odd , prod_odd);
-		i64 t0 = even[0]; i64 t2 = even[1]; i64 t4 = even[2]; i64 t6 = even[3];
-		i64 t1 = odd[0];  i64 t3 = odd[1];  i64 t5 = odd[2];  i64 t7 = odd[3];
-		i64 t8 = f[8] * (i64)g;
-		i64 t9 = f[9] * (i64)g;
-		FE_CARRY; // Carry precondition OK
+		fe_mul_small_avx2(h, f, g);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+	if (mono_have_sse41_cached()) {
+		fe_mul_small_sse41(h, f, g);
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		fe_mul_small_neon(h, f, g);
 		return;
 	}
 #endif
@@ -3418,6 +4031,51 @@ static void fe_mul_small(fe h, const fe f, i32 g)
 #if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
 // AVX2-targeted clone to enable compiler auto-vectorization.
 MONO_TARGET_AVX2
+static i64 muladd4_avx2(i32 a0, i32 a1, i32 a2, i32 a3,
+                        i32 b0, i32 b1, i32 b2, i32 b3)
+{
+	__m256i va = _mm256_setr_epi32(a0, 0, a1, 0, a2, 0, a3, 0);
+	__m256i vb = _mm256_setr_epi32(b0, 0, b1, 0, b2, 0, b3, 0);
+	__m256i prod = _mm256_mul_epi32(va, vb);
+	__m128i lo = _mm256_castsi256_si128(prod);
+	__m128i hi = _mm256_extracti128_si256(prod, 1);
+	__m128i sum = _mm_add_epi64(lo, hi);
+	sum = _mm_add_epi64(sum, _mm_srli_si128(sum, 8));
+	return (i64)_mm_cvtsi128_si64(sum);
+}
+#endif
+
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+MONO_TARGET_SSE41
+static i64 muladd4_sse41(i32 a0, i32 a1, i32 a2, i32 a3,
+                         i32 b0, i32 b1, i32 b2, i32 b3)
+{
+	__m128i va = _mm_setr_epi32(a0, a1, a2, a3);
+	__m128i vb = _mm_setr_epi32(b0, b1, b2, b3);
+	__m128i prod02 = _mm_mul_epi32(va, vb);
+	__m128i prod13 = _mm_mul_epi32(_mm_srli_si128(va, 4),
+	                               _mm_srli_si128(vb, 4));
+	__m128i sum = _mm_add_epi64(prod02, prod13);
+	sum = _mm_add_epi64(sum, _mm_srli_si128(sum, 8));
+	return (i64)_mm_cvtsi128_si64(sum);
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static i64 muladd4_neon(i32 a0, i32 a1, i32 a2, i32 a3,
+                        i32 b0, i32 b1, i32 b2, i32 b3)
+{
+	int32x4_t va = {a0, a1, a2, a3};
+	int32x4_t vb = {b0, b1, b2, b3};
+	int64x2_t prod0 = vmull_s32(vget_low_s32(va), vget_low_s32(vb));
+	int64x2_t prod1 = vmull_s32(vget_high_s32(va), vget_high_s32(vb));
+	int64x2_t sum = vaddq_s64(prod0, prod1);
+	return vgetq_lane_s64(sum, 0) + vgetq_lane_s64(sum, 1);
+}
+#endif
+
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
 static void fe_mul_avx2(fe h, const fe f, const fe g)
 {
 	// Everything is unrolled and put in temporary variables.
@@ -3434,26 +4092,36 @@ static void fe_mul_avx2(fe h, const fe f, const fe g)
 	// |G0|, |G2|, |G4|, |G6|, |G8|  <  2^31
 	// |G1|, |G3|, |G5|, |G7|, |G9|  <  2^30
 
-	i64 t0 = f0*(i64)g0 + F1*(i64)G9 + f2*(i64)G8 + F3*(i64)G7 + f4*(i64)G6
-	       + F5*(i64)G5 + f6*(i64)G4 + F7*(i64)G3 + f8*(i64)G2 + F9*(i64)G1;
-	i64 t1 = f0*(i64)g1 + f1*(i64)g0 + f2*(i64)G9 + f3*(i64)G8 + f4*(i64)G7
-	       + f5*(i64)G6 + f6*(i64)G5 + f7*(i64)G4 + f8*(i64)G3 + f9*(i64)G2;
-	i64 t2 = f0*(i64)g2 + F1*(i64)g1 + f2*(i64)g0 + F3*(i64)G9 + f4*(i64)G8
-	       + F5*(i64)G7 + f6*(i64)G6 + F7*(i64)G5 + f8*(i64)G4 + F9*(i64)G3;
-	i64 t3 = f0*(i64)g3 + f1*(i64)g2 + f2*(i64)g1 + f3*(i64)g0 + f4*(i64)G9
-	       + f5*(i64)G8 + f6*(i64)G7 + f7*(i64)G6 + f8*(i64)G5 + f9*(i64)G4;
-	i64 t4 = f0*(i64)g4 + F1*(i64)g3 + f2*(i64)g2 + F3*(i64)g1 + f4*(i64)g0
-	       + F5*(i64)G9 + f6*(i64)G8 + F7*(i64)G7 + f8*(i64)G6 + F9*(i64)G5;
-	i64 t5 = f0*(i64)g5 + f1*(i64)g4 + f2*(i64)g3 + f3*(i64)g2 + f4*(i64)g1
-	       + f5*(i64)g0 + f6*(i64)G9 + f7*(i64)G8 + f8*(i64)G7 + f9*(i64)G6;
-	i64 t6 = f0*(i64)g6 + F1*(i64)g5 + f2*(i64)g4 + F3*(i64)g3 + f4*(i64)g2
-	       + F5*(i64)g1 + f6*(i64)g0 + F7*(i64)G9 + f8*(i64)G8 + F9*(i64)G7;
-	i64 t7 = f0*(i64)g7 + f1*(i64)g6 + f2*(i64)g5 + f3*(i64)g4 + f4*(i64)g3
-	       + f5*(i64)g2 + f6*(i64)g1 + f7*(i64)g0 + f8*(i64)G9 + f9*(i64)G8;
-	i64 t8 = f0*(i64)g8 + F1*(i64)g7 + f2*(i64)g6 + F3*(i64)g5 + f4*(i64)g4
-	       + F5*(i64)g3 + f6*(i64)g2 + F7*(i64)g1 + f8*(i64)g0 + F9*(i64)G9;
-	i64 t9 = f0*(i64)g9 + f1*(i64)g8 + f2*(i64)g7 + f3*(i64)g6 + f4*(i64)g5
-	       + f5*(i64)g4 + f6*(i64)g3 + f7*(i64)g2 + f8*(i64)g1 + f9*(i64)g0;
+	i64 t0 = muladd4_avx2(f0, F1, f2, F3, g0, G9, G8, G7)
+	       + muladd4_avx2(f4, F5, f6, F7, G6, G5, G4, G3)
+	       + f8*(i64)G2 + F9*(i64)G1;
+	i64 t1 = muladd4_avx2(f0, f1, f2, f3, g1, g0, G9, G8)
+	       + muladd4_avx2(f4, f5, f6, f7, G7, G6, G5, G4)
+	       + f8*(i64)G3 + f9*(i64)G2;
+	i64 t2 = muladd4_avx2(f0, F1, f2, F3, g2, g1, g0, G9)
+	       + muladd4_avx2(f4, F5, f6, F7, G8, G7, G6, G5)
+	       + f8*(i64)G4 + F9*(i64)G3;
+	i64 t3 = muladd4_avx2(f0, f1, f2, f3, g3, g2, g1, g0)
+	       + muladd4_avx2(f4, f5, f6, f7, G9, G8, G7, G6)
+	       + f8*(i64)G5 + f9*(i64)G4;
+	i64 t4 = muladd4_avx2(f0, F1, f2, F3, g4, g3, g2, g1)
+	       + muladd4_avx2(f4, F5, f6, F7, g0, G9, G8, G7)
+	       + f8*(i64)G6 + F9*(i64)G5;
+	i64 t5 = muladd4_avx2(f0, f1, f2, f3, g5, g4, g3, g2)
+	       + muladd4_avx2(f4, f5, f6, f7, g1, g0, G9, G8)
+	       + f8*(i64)G7 + f9*(i64)G6;
+	i64 t6 = muladd4_avx2(f0, F1, f2, F3, g6, g5, g4, g3)
+	       + muladd4_avx2(f4, F5, f6, F7, g2, g1, g0, G9)
+	       + f8*(i64)G8 + F9*(i64)G7;
+	i64 t7 = muladd4_avx2(f0, f1, f2, f3, g7, g6, g5, g4)
+	       + muladd4_avx2(f4, f5, f6, f7, g3, g2, g1, g0)
+	       + f8*(i64)G9 + f9*(i64)G8;
+	i64 t8 = muladd4_avx2(f0, F1, f2, F3, g8, g7, g6, g5)
+	       + muladd4_avx2(f4, F5, f6, F7, g4, g3, g2, g1)
+	       + f8*(i64)g0 + F9*(i64)G9;
+	i64 t9 = muladd4_avx2(f0, f1, f2, f3, g9, g8, g7, g6)
+	       + muladd4_avx2(f4, f5, f6, f7, g5, g4, g3, g2)
+	       + f8*(i64)g1 + f9*(i64)g0;
 	// t0 < 0.67 * 2^61
 	// t1 < 0.41 * 2^61
 	// t2 < 0.52 * 2^61
@@ -3469,11 +4137,118 @@ static void fe_mul_avx2(fe h, const fe f, const fe g)
 }
 #endif
 
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+MONO_TARGET_SSE41
+static void fe_mul_sse41(fe h, const fe f, const fe g)
+{
+	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
+	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
+	i32 g0 = g[0]; i32 g1 = g[1]; i32 g2 = g[2]; i32 g3 = g[3]; i32 g4 = g[4];
+	i32 g5 = g[5]; i32 g6 = g[6]; i32 g7 = g[7]; i32 g8 = g[8]; i32 g9 = g[9];
+	i32 F1 = f1*2; i32 F3 = f3*2; i32 F5 = f5*2; i32 F7 = f7*2; i32 F9 = f9*2;
+	i32 G1 = g1*19;  i32 G2 = g2*19;  i32 G3 = g3*19;
+	i32 G4 = g4*19;  i32 G5 = g5*19;  i32 G6 = g6*19;
+	i32 G7 = g7*19;  i32 G8 = g8*19;  i32 G9 = g9*19;
+
+	i64 t0 = muladd4_sse41(f0, F1, f2, F3, g0, G9, G8, G7)
+	       + muladd4_sse41(f4, F5, f6, F7, G6, G5, G4, G3)
+	       + f8*(i64)G2 + F9*(i64)G1;
+	i64 t1 = muladd4_sse41(f0, f1, f2, f3, g1, g0, G9, G8)
+	       + muladd4_sse41(f4, f5, f6, f7, G7, G6, G5, G4)
+	       + f8*(i64)G3 + f9*(i64)G2;
+	i64 t2 = muladd4_sse41(f0, F1, f2, F3, g2, g1, g0, G9)
+	       + muladd4_sse41(f4, F5, f6, F7, G8, G7, G6, G5)
+	       + f8*(i64)G4 + F9*(i64)G3;
+	i64 t3 = muladd4_sse41(f0, f1, f2, f3, g3, g2, g1, g0)
+	       + muladd4_sse41(f4, f5, f6, f7, G9, G8, G7, G6)
+	       + f8*(i64)G5 + f9*(i64)G4;
+	i64 t4 = muladd4_sse41(f0, F1, f2, F3, g4, g3, g2, g1)
+	       + muladd4_sse41(f4, F5, f6, F7, g0, G9, G8, G7)
+	       + f8*(i64)G6 + F9*(i64)G5;
+	i64 t5 = muladd4_sse41(f0, f1, f2, f3, g5, g4, g3, g2)
+	       + muladd4_sse41(f4, f5, f6, f7, g1, g0, G9, G8)
+	       + f8*(i64)G7 + f9*(i64)G6;
+	i64 t6 = muladd4_sse41(f0, F1, f2, F3, g6, g5, g4, g3)
+	       + muladd4_sse41(f4, F5, f6, F7, g2, g1, g0, G9)
+	       + f8*(i64)G8 + F9*(i64)G7;
+	i64 t7 = muladd4_sse41(f0, f1, f2, f3, g7, g6, g5, g4)
+	       + muladd4_sse41(f4, f5, f6, f7, g3, g2, g1, g0)
+	       + f8*(i64)G9 + f9*(i64)G8;
+	i64 t8 = muladd4_sse41(f0, F1, f2, F3, g8, g7, g6, g5)
+	       + muladd4_sse41(f4, F5, f6, F7, g4, g3, g2, g1)
+	       + f8*(i64)g0 + F9*(i64)G9;
+	i64 t9 = muladd4_sse41(f0, f1, f2, f3, g9, g8, g7, g6)
+	       + muladd4_sse41(f4, f5, f6, f7, g5, g4, g3, g2)
+	       + f8*(i64)g1 + f9*(i64)g0;
+
+	FE_CARRY; // Everything below 2^62, Carry precondition OK
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static void fe_mul_neon(fe h, const fe f, const fe g)
+{
+	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
+	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
+	i32 g0 = g[0]; i32 g1 = g[1]; i32 g2 = g[2]; i32 g3 = g[3]; i32 g4 = g[4];
+	i32 g5 = g[5]; i32 g6 = g[6]; i32 g7 = g[7]; i32 g8 = g[8]; i32 g9 = g[9];
+	i32 F1 = f1*2; i32 F3 = f3*2; i32 F5 = f5*2; i32 F7 = f7*2; i32 F9 = f9*2;
+	i32 G1 = g1*19;  i32 G2 = g2*19;  i32 G3 = g3*19;
+	i32 G4 = g4*19;  i32 G5 = g5*19;  i32 G6 = g6*19;
+	i32 G7 = g7*19;  i32 G8 = g8*19;  i32 G9 = g9*19;
+
+	i64 t0 = muladd4_neon(f0, F1, f2, F3, g0, G9, G8, G7)
+	       + muladd4_neon(f4, F5, f6, F7, G6, G5, G4, G3)
+	       + f8*(i64)G2 + F9*(i64)G1;
+	i64 t1 = muladd4_neon(f0, f1, f2, f3, g1, g0, G9, G8)
+	       + muladd4_neon(f4, f5, f6, f7, G7, G6, G5, G4)
+	       + f8*(i64)G3 + f9*(i64)G2;
+	i64 t2 = muladd4_neon(f0, F1, f2, F3, g2, g1, g0, G9)
+	       + muladd4_neon(f4, F5, f6, F7, G8, G7, G6, G5)
+	       + f8*(i64)G4 + F9*(i64)G3;
+	i64 t3 = muladd4_neon(f0, f1, f2, f3, g3, g2, g1, g0)
+	       + muladd4_neon(f4, f5, f6, f7, G9, G8, G7, G6)
+	       + f8*(i64)G5 + f9*(i64)G4;
+	i64 t4 = muladd4_neon(f0, F1, f2, F3, g4, g3, g2, g1)
+	       + muladd4_neon(f4, F5, f6, F7, g0, G9, G8, G7)
+	       + f8*(i64)G6 + F9*(i64)G5;
+	i64 t5 = muladd4_neon(f0, f1, f2, f3, g5, g4, g3, g2)
+	       + muladd4_neon(f4, f5, f6, f7, g1, g0, G9, G8)
+	       + f8*(i64)G7 + f9*(i64)G6;
+	i64 t6 = muladd4_neon(f0, F1, f2, F3, g6, g5, g4, g3)
+	       + muladd4_neon(f4, F5, f6, F7, g2, g1, g0, G9)
+	       + f8*(i64)G8 + F9*(i64)G7;
+	i64 t7 = muladd4_neon(f0, f1, f2, f3, g7, g6, g5, g4)
+	       + muladd4_neon(f4, f5, f6, f7, g3, g2, g1, g0)
+	       + f8*(i64)G9 + f9*(i64)G8;
+	i64 t8 = muladd4_neon(f0, F1, f2, F3, g8, g7, g6, g5)
+	       + muladd4_neon(f4, F5, f6, F7, g4, g3, g2, g1)
+	       + f8*(i64)g0 + F9*(i64)G9;
+	i64 t9 = muladd4_neon(f0, f1, f2, f3, g9, g8, g7, g6)
+	       + muladd4_neon(f4, f5, f6, f7, g5, g4, g3, g2)
+	       + f8*(i64)g1 + f9*(i64)g0;
+
+	FE_CARRY; // Everything below 2^62, Carry precondition OK
+}
+#endif
+
 static void fe_mul(fe h, const fe f, const fe g)
 {
 #if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
 	if (mono_have_avx2_cached()) {
 		fe_mul_avx2(h, f, g);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+	if (mono_have_sse41_cached()) {
+		fe_mul_sse41(h, f, g);
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		fe_mul_neon(h, f, g);
 		return;
 	}
 #endif
@@ -3546,26 +4321,26 @@ static void fe_sq_avx2(fe h, const fe f)
 	// |f1_2| , |f3_2| , |f5_2| , |f7_2| , |f9_2|  <  1.65 * 2^26
 	// |f5_38|, |f6_19|, |f7_38|, |f8_19|, |f9_38| <  2^31
 
-	i64 t0 = f0  *(i64)f0    + f1_2*(i64)f9_38 + f2_2*(i64)f8_19
-	       + f3_2*(i64)f7_38 + f4_2*(i64)f6_19 + f5  *(i64)f5_38;
-	i64 t1 = f0_2*(i64)f1    + f2  *(i64)f9_38 + f3_2*(i64)f8_19
-	       + f4  *(i64)f7_38 + f5_2*(i64)f6_19;
-	i64 t2 = f0_2*(i64)f2    + f1_2*(i64)f1    + f3_2*(i64)f9_38
-	       + f4_2*(i64)f8_19 + f5_2*(i64)f7_38 + f6  *(i64)f6_19;
-	i64 t3 = f0_2*(i64)f3    + f1_2*(i64)f2    + f4  *(i64)f9_38
-	       + f5_2*(i64)f8_19 + f6  *(i64)f7_38;
-	i64 t4 = f0_2*(i64)f4    + f1_2*(i64)f3_2  + f2  *(i64)f2
-	       + f5_2*(i64)f9_38 + f6_2*(i64)f8_19 + f7  *(i64)f7_38;
-	i64 t5 = f0_2*(i64)f5    + f1_2*(i64)f4    + f2_2*(i64)f3
-	       + f6  *(i64)f9_38 + f7_2*(i64)f8_19;
-	i64 t6 = f0_2*(i64)f6    + f1_2*(i64)f5_2  + f2_2*(i64)f4
-	       + f3_2*(i64)f3    + f7_2*(i64)f9_38 + f8  *(i64)f8_19;
-	i64 t7 = f0_2*(i64)f7    + f1_2*(i64)f6    + f2_2*(i64)f5
-	       + f3_2*(i64)f4    + f8  *(i64)f9_38;
-	i64 t8 = f0_2*(i64)f8    + f1_2*(i64)f7_2  + f2_2*(i64)f6
-	       + f3_2*(i64)f5_2  + f4  *(i64)f4    + f9  *(i64)f9_38;
-	i64 t9 = f0_2*(i64)f9    + f1_2*(i64)f8    + f2_2*(i64)f7
-	       + f3_2*(i64)f6    + f4  *(i64)f5_2;
+	i64 t0 = muladd4_avx2(f0, f1_2, f2_2, f3_2, f0, f9_38, f8_19, f7_38)
+	       + f4_2*(i64)f6_19 + f5*(i64)f5_38;
+	i64 t1 = muladd4_avx2(f0_2, f2, f3_2, f4, f1, f9_38, f8_19, f7_38)
+	       + f5_2*(i64)f6_19;
+	i64 t2 = muladd4_avx2(f0_2, f1_2, f3_2, f4_2, f2, f1, f9_38, f8_19)
+	       + f5_2*(i64)f7_38 + f6*(i64)f6_19;
+	i64 t3 = muladd4_avx2(f0_2, f1_2, f4, f5_2, f3, f2, f9_38, f8_19)
+	       + f6*(i64)f7_38;
+	i64 t4 = muladd4_avx2(f0_2, f1_2, f2, f5_2, f4, f3_2, f2, f9_38)
+	       + f6_2*(i64)f8_19 + f7*(i64)f7_38;
+	i64 t5 = muladd4_avx2(f0_2, f1_2, f2_2, f6, f5, f4, f3, f9_38)
+	       + f7_2*(i64)f8_19;
+	i64 t6 = muladd4_avx2(f0_2, f1_2, f2_2, f3_2, f6, f5_2, f4, f3)
+	       + f7_2*(i64)f9_38 + f8*(i64)f8_19;
+	i64 t7 = muladd4_avx2(f0_2, f1_2, f2_2, f3_2, f7, f6, f5, f4)
+	       + f8*(i64)f9_38;
+	i64 t8 = muladd4_avx2(f0_2, f1_2, f2_2, f3_2, f8, f7_2, f6, f5_2)
+	       + f4*(i64)f4 + f9*(i64)f9_38;
+	i64 t9 = muladd4_avx2(f0_2, f1_2, f2_2, f3_2, f9, f8, f7, f6)
+	       + f4*(i64)f5_2;
 	// t0 < 0.67 * 2^61
 	// t1 < 0.41 * 2^61
 	// t2 < 0.52 * 2^61
@@ -3581,11 +4356,94 @@ static void fe_sq_avx2(fe h, const fe f)
 }
 #endif
 
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+MONO_TARGET_SSE41
+static void fe_sq_sse41(fe h, const fe f)
+{
+	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
+	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
+	i32 f0_2  = f0*2;   i32 f1_2  = f1*2;   i32 f2_2  = f2*2;   i32 f3_2 = f3*2;
+	i32 f4_2  = f4*2;   i32 f5_2  = f5*2;   i32 f6_2  = f6*2;   i32 f7_2 = f7*2;
+	i32 f5_38 = f5*38;  i32 f6_19 = f6*19;  i32 f7_38 = f7*38;
+	i32 f8_19 = f8*19;  i32 f9_38 = f9*38;
+
+	i64 t0 = muladd4_sse41(f0, f1_2, f2_2, f3_2, f0, f9_38, f8_19, f7_38)
+	       + f4_2*(i64)f6_19 + f5*(i64)f5_38;
+	i64 t1 = muladd4_sse41(f0_2, f2, f3_2, f4, f1, f9_38, f8_19, f7_38)
+	       + f5_2*(i64)f6_19;
+	i64 t2 = muladd4_sse41(f0_2, f1_2, f3_2, f4_2, f2, f1, f9_38, f8_19)
+	       + f5_2*(i64)f7_38 + f6*(i64)f6_19;
+	i64 t3 = muladd4_sse41(f0_2, f1_2, f4, f5_2, f3, f2, f9_38, f8_19)
+	       + f6*(i64)f7_38;
+	i64 t4 = muladd4_sse41(f0_2, f1_2, f2, f5_2, f4, f3_2, f2, f9_38)
+	       + f6_2*(i64)f8_19 + f7*(i64)f7_38;
+	i64 t5 = muladd4_sse41(f0_2, f1_2, f2_2, f6, f5, f4, f3, f9_38)
+	       + f7_2*(i64)f8_19;
+	i64 t6 = muladd4_sse41(f0_2, f1_2, f2_2, f3_2, f6, f5_2, f4, f3)
+	       + f7_2*(i64)f9_38 + f8*(i64)f8_19;
+	i64 t7 = muladd4_sse41(f0_2, f1_2, f2_2, f3_2, f7, f6, f5, f4)
+	       + f8*(i64)f9_38;
+	i64 t8 = muladd4_sse41(f0_2, f1_2, f2_2, f3_2, f8, f7_2, f6, f5_2)
+	       + f4*(i64)f4 + f9*(i64)f9_38;
+	i64 t9 = muladd4_sse41(f0_2, f1_2, f2_2, f3_2, f9, f8, f7, f6)
+	       + f4*(i64)f5_2;
+
+	FE_CARRY;
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static void fe_sq_neon(fe h, const fe f)
+{
+	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
+	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
+	i32 f0_2  = f0*2;   i32 f1_2  = f1*2;   i32 f2_2  = f2*2;   i32 f3_2 = f3*2;
+	i32 f4_2  = f4*2;   i32 f5_2  = f5*2;   i32 f6_2  = f6*2;   i32 f7_2 = f7*2;
+	i32 f5_38 = f5*38;  i32 f6_19 = f6*19;  i32 f7_38 = f7*38;
+	i32 f8_19 = f8*19;  i32 f9_38 = f9*38;
+
+	i64 t0 = muladd4_neon(f0, f1_2, f2_2, f3_2, f0, f9_38, f8_19, f7_38)
+	       + f4_2*(i64)f6_19 + f5*(i64)f5_38;
+	i64 t1 = muladd4_neon(f0_2, f2, f3_2, f4, f1, f9_38, f8_19, f7_38)
+	       + f5_2*(i64)f6_19;
+	i64 t2 = muladd4_neon(f0_2, f1_2, f3_2, f4_2, f2, f1, f9_38, f8_19)
+	       + f5_2*(i64)f7_38 + f6*(i64)f6_19;
+	i64 t3 = muladd4_neon(f0_2, f1_2, f4, f5_2, f3, f2, f9_38, f8_19)
+	       + f6*(i64)f7_38;
+	i64 t4 = muladd4_neon(f0_2, f1_2, f2, f5_2, f4, f3_2, f2, f9_38)
+	       + f6_2*(i64)f8_19 + f7*(i64)f7_38;
+	i64 t5 = muladd4_neon(f0_2, f1_2, f2_2, f6, f5, f4, f3, f9_38)
+	       + f7_2*(i64)f8_19;
+	i64 t6 = muladd4_neon(f0_2, f1_2, f2_2, f3_2, f6, f5_2, f4, f3)
+	       + f7_2*(i64)f9_38 + f8*(i64)f8_19;
+	i64 t7 = muladd4_neon(f0_2, f1_2, f2_2, f3_2, f7, f6, f5, f4)
+	       + f8*(i64)f9_38;
+	i64 t8 = muladd4_neon(f0_2, f1_2, f2_2, f3_2, f8, f7_2, f6, f5_2)
+	       + f4*(i64)f4 + f9*(i64)f9_38;
+	i64 t9 = muladd4_neon(f0_2, f1_2, f2_2, f3_2, f9, f8, f7, f6)
+	       + f4*(i64)f5_2;
+
+	FE_CARRY;
+}
+#endif
+
 static void fe_sq(fe h, const fe f)
 {
 #if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
 	if (mono_have_avx2_cached()) {
 		fe_sq_avx2(h, f);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE41) && MONO_HAS_SSE41
+	if (mono_have_sse41_cached()) {
+		fe_sq_sse41(h, f);
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		fe_sq_neon(h, f);
 		return;
 	}
 #endif
@@ -5263,6 +6121,18 @@ int crypto_aead_read(crypto_aead_ctx *ctx, u8 *plain_text, const u8 mac[16],
 	return mismatch;
 }
 
+int crypto_aead_read_safe(crypto_aead_ctx *ctx, u8 *plain_text,
+                          const u8 mac[16], const u8 *ad, size_t ad_size,
+                          const u8 *cipher_text, size_t text_size)
+{
+	int mismatch = crypto_aead_read(ctx, plain_text, mac, ad, ad_size,
+	                                cipher_text, text_size);
+	if (mismatch) {
+		crypto_wipe(plain_text, text_size);
+	}
+	return mismatch;
+}
+
 void crypto_aead_lock(u8 *cipher_text, u8 mac[16], const u8 key[32],
                       const u8  nonce[24], const u8 *ad, size_t ad_size,
                       const u8 *plain_text, size_t text_size)
@@ -5283,6 +6153,18 @@ int crypto_aead_unlock(u8 *plain_text, const u8  mac[16], const u8 key[32],
 	int mismatch = crypto_aead_read(&ctx, plain_text, mac, ad, ad_size,
 	                                cipher_text, text_size);
 	crypto_wipe(&ctx, sizeof(ctx));
+	return mismatch;
+}
+
+int crypto_aead_unlock_safe(u8 *plain_text, const u8 mac[16], const u8 key[32],
+                            const u8 nonce[24], const u8 *ad, size_t ad_size,
+                            const u8 *cipher_text, size_t text_size)
+{
+	int mismatch = crypto_aead_unlock(plain_text, mac, key, nonce, ad,
+	                                  ad_size, cipher_text, text_size);
+	if (mismatch) {
+		crypto_wipe(plain_text, text_size);
+	}
 	return mismatch;
 }
 
@@ -5328,6 +6210,32 @@ int crypto_aead_unlock_checked(u8 *plain_text, const u8 mac[16],
 	int mismatch = crypto_aead_unlock(plain_text, mac, key, nonce, ad,
 	                                  ad_size, cipher_text, text_size);
 	return mismatch ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
+
+int crypto_aead_unlock_safe_checked(u8 *plain_text, const u8 mac[16],
+                                    const u8 key[32], const u8 nonce[24],
+                                    const u8 *ad, size_t ad_size,
+                                    const u8 *cipher_text, size_t text_size)
+{
+	int err = check_out_ptr(plain_text);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(mac, 16);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 24);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(ad, ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(cipher_text, text_size);
+	if (err != CRYPTO_OK) { return err; }
+	int mismatch = crypto_aead_unlock(plain_text, mac, key, nonce, ad,
+	                                  ad_size, cipher_text, text_size);
+	if (mismatch) {
+		crypto_wipe(plain_text, text_size);
+		return CRYPTO_ERR_AUTH;
+	}
+	return CRYPTO_OK;
 }
 
 int crypto_aead_write_checked(crypto_aead_ctx *ctx, u8 *cipher_text,
@@ -5381,6 +6289,38 @@ int crypto_aead_read_checked(crypto_aead_ctx *ctx, u8 *plain_text,
 	int mismatch = crypto_aead_read(ctx, plain_text, mac, ad, ad_size,
 	                                cipher_text, text_size);
 	return mismatch ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
+
+int crypto_aead_read_safe_checked(crypto_aead_ctx *ctx, u8 *plain_text,
+                                  const u8 mac[16], const u8 *ad,
+                                  size_t ad_size,
+                                  const u8 *cipher_text, size_t text_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	if (text_size != 0 && plain_text == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+	err = check_ptr(mac, 16);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(ad, ad_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(cipher_text, text_size);
+	if (err != CRYPTO_OK) { return err; }
+	u64 blocks = text_size / 64 + (text_size % 64 != 0);
+	u64 ctr1 = 0;
+	err = checked_add_u64(ctx->counter, 1, &ctr1);
+	if (err != CRYPTO_OK) { return err; }
+	u64 end = 0;
+	err = checked_add_u64(ctr1, blocks, &end);
+	if (err != CRYPTO_OK) { return err; }
+	int mismatch = crypto_aead_read(ctx, plain_text, mac, ad, ad_size,
+	                                cipher_text, text_size);
+	if (mismatch) {
+		crypto_wipe(plain_text, text_size);
+		return CRYPTO_ERR_AUTH;
+	}
+	return CRYPTO_OK;
 }
 
 

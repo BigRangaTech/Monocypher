@@ -96,6 +96,12 @@ Build profiles:
 - `SANITIZE=address,undefined` builds with sanitizers. You can also use
   the convenience targets: `make harden` and `make sanitize`.
 - `SIZE=1` builds with `-Os` and `-DBLAKE2_NO_UNROLLING` (smaller binaries).
+- `ARGON2_THREADS=1` enables pthread-based parallel Argon2 lanes
+  (POSIX-only; falls back to single-threaded on Windows).
+- `BLAKE3_THREADS=1` enables pthread-based parallel BLAKE3 subtree hashing
+  (POSIX-only; falls back to single-threaded on Windows).
+- `CHACHA20_THREADS=1` enables pthread-based parallel ChaCha20 for large
+  buffers (POSIX-only; falls back to single-threaded on Windows).
 
 ### Option 3: install it on your system
 

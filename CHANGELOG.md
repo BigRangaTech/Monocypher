@@ -14,6 +14,15 @@ Unreleased
 - Added SIMD-accelerated ChaCha20 (SSE2/NEON) with runtime detection.
 - Added SIMD Poly1305 multiplication (AVX2/SSE2/NEON) and SIMD X25519
   field ops (AVX2/SSE2/NEON), with runtime dispatch.
+- Added AVX2 intrinsics-based dot-product helpers for X25519 field mul/sq.
+- Added NEON dot-product helpers for X25519 field mul/sq.
+- Added SSE4.1 dot-product helpers for X25519 field mul/sq and mul-small.
+- Added SIMD fast path for constant-time verify (x16/x32/x64).
+- Added optional pthread-based parallel Argon2 lanes (ARGON2_THREADS=1).
+- Added optional pthread-based parallel BLAKE3 subtree hashing (BLAKE3_THREADS=1).
+- Added safe AEAD helpers that zero plaintext on authentication failure.
+- Added optional pthread-based parallel ChaCha20 (CHACHA20_THREADS=1).
+- Added AVX2 8-way ChaCha20 path with runtime dispatch.
 
 
 4.0.2
