@@ -11,6 +11,9 @@ Unreleased
 - Strengthened crypto_wipe with platform secure zeroization when available.
 - Added crypto_random OS-backed RNG helper.
 - Added libFuzzer and AFL harnesses for AEAD, X25519, EdDSA, and Argon2.
+- Added SIMD-accelerated ChaCha20 (SSE2/NEON) with runtime detection.
+- Added SIMD Poly1305 multiplication (AVX2/SSE2/NEON) and SIMD X25519
+  field ops (AVX2/SSE2/NEON), with runtime dispatch.
 
 
 4.0.2

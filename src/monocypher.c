@@ -62,6 +62,20 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__GNUC__) || defined(__clang__)
+#include <cpuid.h>
+#endif
+#include <immintrin.h>
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define MONO_LITTLE_ENDIAN 1
+#else
+#define MONO_LITTLE_ENDIAN 0
+#endif
 #if defined(__GLIBC__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
     defined(__NetBSD__) || defined(__APPLE__)
 extern void explicit_bzero(void *s, size_t n);
@@ -341,6 +355,346 @@ static void chacha20_rounds(u32 out[16], const u32 in[16])
 	out[12] = t12;  out[13] = t13;  out[14] = t14;  out[15] = t15;
 }
 
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__GNUC__) || defined(__clang__)
+#define MONO_TARGET_SSE2 __attribute__((target("sse2")))
+#define MONO_TARGET_AVX2 __attribute__((target("avx2")))
+#define MONO_HAS_AVX2 1
+#else
+#define MONO_TARGET_SSE2
+#if defined(_MSC_VER) && defined(__AVX2__)
+#define MONO_TARGET_AVX2
+#define MONO_HAS_AVX2 1
+#else
+#define MONO_TARGET_AVX2
+#define MONO_HAS_AVX2 0
+#endif
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+#define MONO_HAS_SSE2 1
+#elif defined(__i386__) && defined(__SSE2__)
+#define MONO_HAS_SSE2 1
+#elif defined(_M_IX86) && defined(_M_IX86_FP) && _M_IX86_FP >= 2
+#define MONO_HAS_SSE2 1
+#else
+#define MONO_HAS_SSE2 0
+#endif
+
+static int chacha20_cpu_has_sse2(void)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+	return 1;
+#elif defined(__i386__) && (defined(__GNUC__) || defined(__clang__))
+	unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+	if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+		return 0;
+	}
+	return (edx & bit_SSE2) != 0;
+#elif defined(_M_IX86) && defined(_MSC_VER)
+	int regs[4] = {0,0,0,0};
+	__cpuid(regs, 1);
+	return (regs[3] & (1 << 26)) != 0;
+#else
+	return 0;
+#endif
+}
+
+static int mono_have_sse2_cached(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		cached = chacha20_cpu_has_sse2();
+	}
+	return cached;
+}
+
+#if MONO_HAS_AVX2
+static int mono_cpu_has_avx2(void)
+{
+#if defined(__GNUC__) || defined(__clang__)
+	return __builtin_cpu_supports("avx2");
+#elif defined(_MSC_VER)
+	int regs[4] = {0,0,0,0};
+	__cpuid(regs, 1);
+	const int osxsave = (regs[2] & (1 << 27)) != 0;
+	const int avx = (regs[2] & (1 << 28)) != 0;
+	if (!(osxsave && avx)) {
+		return 0;
+	}
+	unsigned long long xcr0 = _xgetbv(0);
+	if ((xcr0 & 0x6) != 0x6) {
+		return 0;
+	}
+	__cpuidex(regs, 7, 0);
+	return (regs[1] & (1 << 5)) != 0;
+#else
+	return 0;
+#endif
+}
+
+static int mono_have_avx2_cached(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		cached = mono_cpu_has_avx2();
+	}
+	return cached;
+}
+#endif
+
+MONO_TARGET_SSE2
+static __m128i rotl32_sse2(__m128i v, int n)
+{
+	return _mm_or_si128(_mm_slli_epi32(v, n), _mm_srli_epi32(v, 32 - n));
+}
+
+MONO_TARGET_SSE2
+static void chacha20_blocks4_sse2(u8 *cipher_text, const u8 *plain_text,
+                                  const u32 input[16], u64 ctr)
+{
+	const u32 c0 = (u32)ctr;
+	const u32 c1 = (u32)(ctr + 1);
+	const u32 c2 = (u32)(ctr + 2);
+	const u32 c3 = (u32)(ctr + 3);
+	const u32 h0 = (u32)(ctr >> 32);
+	const u32 h1 = (u32)((ctr + 1) >> 32);
+	const u32 h2 = (u32)((ctr + 2) >> 32);
+	const u32 h3 = (u32)((ctr + 3) >> 32);
+
+	__m128i v0  = _mm_set1_epi32((i32)input[0]);
+	__m128i v1  = _mm_set1_epi32((i32)input[1]);
+	__m128i v2  = _mm_set1_epi32((i32)input[2]);
+	__m128i v3  = _mm_set1_epi32((i32)input[3]);
+	__m128i v4  = _mm_set1_epi32((i32)input[4]);
+	__m128i v5  = _mm_set1_epi32((i32)input[5]);
+	__m128i v6  = _mm_set1_epi32((i32)input[6]);
+	__m128i v7  = _mm_set1_epi32((i32)input[7]);
+	__m128i v8  = _mm_set1_epi32((i32)input[8]);
+	__m128i v9  = _mm_set1_epi32((i32)input[9]);
+	__m128i v10 = _mm_set1_epi32((i32)input[10]);
+	__m128i v11 = _mm_set1_epi32((i32)input[11]);
+	__m128i v12 = _mm_set_epi32((i32)c3, (i32)c2, (i32)c1, (i32)c0);
+	__m128i v13 = _mm_set_epi32((i32)h3, (i32)h2, (i32)h1, (i32)h0);
+	__m128i v14 = _mm_set1_epi32((i32)input[14]);
+	__m128i v15 = _mm_set1_epi32((i32)input[15]);
+
+	const __m128i i0  = v0;  const __m128i i1  = v1;
+	const __m128i i2  = v2;  const __m128i i3  = v3;
+	const __m128i i4  = v4;  const __m128i i5  = v5;
+	const __m128i i6  = v6;  const __m128i i7  = v7;
+	const __m128i i8  = v8;  const __m128i i9  = v9;
+	const __m128i i10 = v10; const __m128i i11 = v11;
+	const __m128i i12 = v12; const __m128i i13 = v13;
+	const __m128i i14 = v14; const __m128i i15 = v15;
+
+#define QR(a,b,c,d)                            \
+	a = _mm_add_epi32(a, b);                  \
+	d = _mm_xor_si128(d, a);                  \
+	d = rotl32_sse2(d, 16);                   \
+	c = _mm_add_epi32(c, d);                  \
+	b = _mm_xor_si128(b, c);                  \
+	b = rotl32_sse2(b, 12);                   \
+	a = _mm_add_epi32(a, b);                  \
+	d = _mm_xor_si128(d, a);                  \
+	d = rotl32_sse2(d,  8);                   \
+	c = _mm_add_epi32(c, d);                  \
+	b = _mm_xor_si128(b, c);                  \
+	b = rotl32_sse2(b,  7)
+
+	for (int i = 0; i < 10; i++) {
+		QR(v0, v4, v8 , v12);
+		QR(v1, v5, v9 , v13);
+		QR(v2, v6, v10, v14);
+		QR(v3, v7, v11, v15);
+		QR(v0, v5, v10, v15);
+		QR(v1, v6, v11, v12);
+		QR(v2, v7, v8 , v13);
+		QR(v3, v4, v9 , v14);
+	}
+
+	v0  = _mm_add_epi32(v0 , i0 );
+	v1  = _mm_add_epi32(v1 , i1 );
+	v2  = _mm_add_epi32(v2 , i2 );
+	v3  = _mm_add_epi32(v3 , i3 );
+	v4  = _mm_add_epi32(v4 , i4 );
+	v5  = _mm_add_epi32(v5 , i5 );
+	v6  = _mm_add_epi32(v6 , i6 );
+	v7  = _mm_add_epi32(v7 , i7 );
+	v8  = _mm_add_epi32(v8 , i8 );
+	v9  = _mm_add_epi32(v9 , i9 );
+	v10 = _mm_add_epi32(v10, i10);
+	v11 = _mm_add_epi32(v11, i11);
+	v12 = _mm_add_epi32(v12, i12);
+	v13 = _mm_add_epi32(v13, i13);
+	v14 = _mm_add_epi32(v14, i14);
+	v15 = _mm_add_epi32(v15, i15);
+
+	u32 tmp[16][4];
+	_mm_storeu_si128((__m128i*)tmp[0] , v0 );
+	_mm_storeu_si128((__m128i*)tmp[1] , v1 );
+	_mm_storeu_si128((__m128i*)tmp[2] , v2 );
+	_mm_storeu_si128((__m128i*)tmp[3] , v3 );
+	_mm_storeu_si128((__m128i*)tmp[4] , v4 );
+	_mm_storeu_si128((__m128i*)tmp[5] , v5 );
+	_mm_storeu_si128((__m128i*)tmp[6] , v6 );
+	_mm_storeu_si128((__m128i*)tmp[7] , v7 );
+	_mm_storeu_si128((__m128i*)tmp[8] , v8 );
+	_mm_storeu_si128((__m128i*)tmp[9] , v9 );
+	_mm_storeu_si128((__m128i*)tmp[10], v10);
+	_mm_storeu_si128((__m128i*)tmp[11], v11);
+	_mm_storeu_si128((__m128i*)tmp[12], v12);
+	_mm_storeu_si128((__m128i*)tmp[13], v13);
+	_mm_storeu_si128((__m128i*)tmp[14], v14);
+	_mm_storeu_si128((__m128i*)tmp[15], v15);
+
+	for (int b = 0; b < 4; b++) {
+		u8 *out = cipher_text + (size_t)b * 64;
+		const u8 *in = plain_text ? (plain_text + (size_t)b * 64) : 0;
+		for (int i = 0; i < 16; i++) {
+			u32 w = tmp[i][b];
+			if (in) {
+				w ^= load32_le(in + (size_t)i * 4);
+			}
+			store32_le(out + (size_t)i * 4, w);
+		}
+	}
+#undef QR
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static inline uint32x4_t rotl32_neon(uint32x4_t v, int n)
+{
+	return vorrq_u32(vshlq_n_u32(v, n), vshrq_n_u32(v, 32 - n));
+}
+
+static int chacha20_cpu_has_neon(void)
+{
+#if defined(__aarch64__)
+	return 1;
+#elif defined(__ARM_NEON)
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+static int mono_have_neon_cached(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		cached = chacha20_cpu_has_neon();
+	}
+	return cached;
+}
+
+static void chacha20_blocks4_neon(u8 *cipher_text, const u8 *plain_text,
+                                  const u32 input[16], u64 ctr)
+{
+	u32 ctr_lo[4] = {(u32)ctr, (u32)(ctr + 1), (u32)(ctr + 2), (u32)(ctr + 3)};
+	u32 ctr_hi[4] = {(u32)(ctr >> 32), (u32)((ctr + 1) >> 32),
+	                 (u32)((ctr + 2) >> 32), (u32)((ctr + 3) >> 32)};
+	uint32x4_t v0  = vdupq_n_u32(input[0]);
+	uint32x4_t v1  = vdupq_n_u32(input[1]);
+	uint32x4_t v2  = vdupq_n_u32(input[2]);
+	uint32x4_t v3  = vdupq_n_u32(input[3]);
+	uint32x4_t v4  = vdupq_n_u32(input[4]);
+	uint32x4_t v5  = vdupq_n_u32(input[5]);
+	uint32x4_t v6  = vdupq_n_u32(input[6]);
+	uint32x4_t v7  = vdupq_n_u32(input[7]);
+	uint32x4_t v8  = vdupq_n_u32(input[8]);
+	uint32x4_t v9  = vdupq_n_u32(input[9]);
+	uint32x4_t v10 = vdupq_n_u32(input[10]);
+	uint32x4_t v11 = vdupq_n_u32(input[11]);
+	uint32x4_t v12 = vld1q_u32(ctr_lo);
+	uint32x4_t v13 = vld1q_u32(ctr_hi);
+	uint32x4_t v14 = vdupq_n_u32(input[14]);
+	uint32x4_t v15 = vdupq_n_u32(input[15]);
+
+	const uint32x4_t i0  = v0;  const uint32x4_t i1  = v1;
+	const uint32x4_t i2  = v2;  const uint32x4_t i3  = v3;
+	const uint32x4_t i4  = v4;  const uint32x4_t i5  = v5;
+	const uint32x4_t i6  = v6;  const uint32x4_t i7  = v7;
+	const uint32x4_t i8  = v8;  const uint32x4_t i9  = v9;
+	const uint32x4_t i10 = v10; const uint32x4_t i11 = v11;
+	const uint32x4_t i12 = v12; const uint32x4_t i13 = v13;
+	const uint32x4_t i14 = v14; const uint32x4_t i15 = v15;
+
+#define QR(a,b,c,d)                 \
+	a = vaddq_u32(a, b);            \
+	d = veorq_u32(d, a);            \
+	d = rotl32_neon(d, 16);         \
+	c = vaddq_u32(c, d);            \
+	b = veorq_u32(b, c);            \
+	b = rotl32_neon(b, 12);         \
+	a = vaddq_u32(a, b);            \
+	d = veorq_u32(d, a);            \
+	d = rotl32_neon(d,  8);         \
+	c = vaddq_u32(c, d);            \
+	b = veorq_u32(b, c);            \
+	b = rotl32_neon(b,  7)
+
+	for (int i = 0; i < 10; i++) {
+		QR(v0, v4, v8 , v12);
+		QR(v1, v5, v9 , v13);
+		QR(v2, v6, v10, v14);
+		QR(v3, v7, v11, v15);
+		QR(v0, v5, v10, v15);
+		QR(v1, v6, v11, v12);
+		QR(v2, v7, v8 , v13);
+		QR(v3, v4, v9 , v14);
+	}
+
+	v0  = vaddq_u32(v0 , i0 );
+	v1  = vaddq_u32(v1 , i1 );
+	v2  = vaddq_u32(v2 , i2 );
+	v3  = vaddq_u32(v3 , i3 );
+	v4  = vaddq_u32(v4 , i4 );
+	v5  = vaddq_u32(v5 , i5 );
+	v6  = vaddq_u32(v6 , i6 );
+	v7  = vaddq_u32(v7 , i7 );
+	v8  = vaddq_u32(v8 , i8 );
+	v9  = vaddq_u32(v9 , i9 );
+	v10 = vaddq_u32(v10, i10);
+	v11 = vaddq_u32(v11, i11);
+	v12 = vaddq_u32(v12, i12);
+	v13 = vaddq_u32(v13, i13);
+	v14 = vaddq_u32(v14, i14);
+	v15 = vaddq_u32(v15, i15);
+
+	u32 tmp[16][4];
+	vst1q_u32(tmp[0] , v0 );
+	vst1q_u32(tmp[1] , v1 );
+	vst1q_u32(tmp[2] , v2 );
+	vst1q_u32(tmp[3] , v3 );
+	vst1q_u32(tmp[4] , v4 );
+	vst1q_u32(tmp[5] , v5 );
+	vst1q_u32(tmp[6] , v6 );
+	vst1q_u32(tmp[7] , v7 );
+	vst1q_u32(tmp[8] , v8 );
+	vst1q_u32(tmp[9] , v9 );
+	vst1q_u32(tmp[10], v10);
+	vst1q_u32(tmp[11], v11);
+	vst1q_u32(tmp[12], v12);
+	vst1q_u32(tmp[13], v13);
+	vst1q_u32(tmp[14], v14);
+	vst1q_u32(tmp[15], v15);
+
+	for (int b = 0; b < 4; b++) {
+		u8 *out = cipher_text + (size_t)b * 64;
+		const u8 *in = plain_text ? (plain_text + (size_t)b * 64) : 0;
+		for (int i = 0; i < 16; i++) {
+			u32 w = tmp[i][b];
+			if (in) {
+				w ^= load32_le(in + (size_t)i * 4);
+			}
+			store32_le(out + (size_t)i * 4, w);
+		}
+	}
+#undef QR
+}
+#endif
+
 static const u8 *chacha20_constant = (const u8*)"expand 32-byte k"; // 16 bytes
 
 void crypto_chacha20_h(u8 out[32], const u8 key[32], const u8 in [16])
@@ -372,6 +726,41 @@ u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
 	// Whole blocks
 	u32    pool[16];
 	size_t nb_blocks = text_size >> 6;
+	u64 block_ctr = ctr;
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	int use_sse2 = chacha20_cpu_has_sse2();
+#else
+	int use_sse2 = 0;
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	int use_neon = chacha20_cpu_has_neon();
+#else
+	int use_neon = 0;
+#endif
+	while (nb_blocks >= 4 && (use_sse2 || use_neon)) {
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+		if (use_sse2) {
+			chacha20_blocks4_sse2(cipher_text, plain_text, input, block_ctr);
+		} else
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+		if (use_neon) {
+			chacha20_blocks4_neon(cipher_text, plain_text, input, block_ctr);
+		} else
+#endif
+		{
+			break;
+		}
+		cipher_text += 64 * 4;
+		if (plain_text != NULL) {
+			plain_text += 64 * 4;
+		}
+		block_ctr += 4;
+		nb_blocks -= 4;
+	}
+
+	input[12] = (u32)block_ctr;
+	input[13] = (u32)(block_ctr >> 32);
 	FOR (i, 0, nb_blocks) {
 		chacha20_rounds(pool, input);
 		if (plain_text != NULL) {
@@ -519,6 +908,136 @@ int crypto_chacha20_x_checked(u8 *cipher_text, const u8 *plain_text,
 /// Poly 1305 ///
 /////////////////
 
+static void poly_load32x4(const u8 *in, u32 out[4])
+{
+#if MONO_LITTLE_ENDIAN && defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		__m128i v = _mm_loadu_si128((const __m128i*)in);
+		_mm_storeu_si128((__m128i*)out, v);
+		return;
+	}
+#endif
+#if MONO_LITTLE_ENDIAN && (defined(__ARM_NEON) || defined(__aarch64__))
+	if (mono_have_neon_cached()) {
+		uint8x16_t v = vld1q_u8(in);
+		vst1q_u32(out, vreinterpretq_u32_u8(v));
+		return;
+	}
+#endif
+	out[0] = load32_le(in + 0);
+	out[1] = load32_le(in + 4);
+	out[2] = load32_le(in + 8);
+	out[3] = load32_le(in + 12);
+}
+
+static u64 poly_mul_sum4_scalar(const u64 s[4], const u32 r[4])
+{
+	return s[0] * r[0] + s[1] * r[1] + s[2] * r[2] + s[3] * r[3];
+}
+
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
+static void poly_mul_sum4x2_avx2(const u64 s[4], const u32 r0[4],
+                                 const u32 r1[4], u64 *out0, u64 *out1)
+{
+	u32 s_lo[8] = {
+		(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3],
+		(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3],
+	};
+	u32 s_hi[8] = {
+		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
+		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
+		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
+		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
+	};
+	u32 r[8] = {
+		r0[0], r0[1], r0[2], r0[3],
+		r1[0], r1[1], r1[2], r1[3],
+	};
+
+	__m256i vs_lo = _mm256_loadu_si256((const __m256i*)s_lo);
+	__m256i vr    = _mm256_loadu_si256((const __m256i*)r);
+	__m256i prod_even = _mm256_mul_epu32(vs_lo, vr);
+	__m256i prod_odd  = _mm256_mul_epu32(_mm256_srli_si256(vs_lo, 4),
+	                                     _mm256_srli_si256(vr, 4));
+	u64 pe[4];
+	u64 po[4];
+	_mm256_storeu_si256((__m256i*)pe, prod_even);
+	_mm256_storeu_si256((__m256i*)po, prod_odd);
+	u64 sum0 = pe[0] + po[0] + pe[1] + po[1];
+	u64 sum1 = pe[2] + po[2] + pe[3] + po[3];
+
+	__m256i vs_hi = _mm256_loadu_si256((const __m256i*)s_hi);
+	prod_even = _mm256_mul_epu32(vs_hi, vr);
+	prod_odd  = _mm256_mul_epu32(_mm256_srli_si256(vs_hi, 4),
+	                             _mm256_srli_si256(vr, 4));
+	_mm256_storeu_si256((__m256i*)pe, prod_even);
+	_mm256_storeu_si256((__m256i*)po, prod_odd);
+	u64 sum0_hi = pe[0] + po[0] + pe[1] + po[1];
+	u64 sum1_hi = pe[2] + po[2] + pe[3] + po[3];
+
+	*out0 = sum0 + (sum0_hi << 32);
+	*out1 = sum1 + (sum1_hi << 32);
+}
+#endif
+
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+MONO_TARGET_SSE2
+static u64 poly_mul_sum4_sse2(const u64 s[4], const u32 r[4])
+{
+	u32 s_lo[4] = {(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3]};
+	u32 s_hi[4] = {
+		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
+		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
+	};
+	__m128i vs_lo = _mm_loadu_si128((const __m128i*)s_lo);
+	__m128i vr    = _mm_loadu_si128((const __m128i*)r);
+	__m128i prod02 = _mm_mul_epu32(vs_lo, vr);
+	__m128i prod13 = _mm_mul_epu32(_mm_srli_si128(vs_lo, 4),
+	                               _mm_srli_si128(vr, 4));
+	u64 tmp0[2];
+	u64 tmp1[2];
+	_mm_storeu_si128((__m128i*)tmp0, prod02);
+	_mm_storeu_si128((__m128i*)tmp1, prod13);
+	u64 sum = tmp0[0] + tmp0[1] + tmp1[0] + tmp1[1];
+
+	__m128i vs_hi = _mm_loadu_si128((const __m128i*)s_hi);
+	__m128i prod02_hi = _mm_mul_epu32(vs_hi, vr);
+	__m128i prod13_hi = _mm_mul_epu32(_mm_srli_si128(vs_hi, 4),
+	                                  _mm_srli_si128(vr, 4));
+	_mm_storeu_si128((__m128i*)tmp0, prod02_hi);
+	_mm_storeu_si128((__m128i*)tmp1, prod13_hi);
+	u64 sum_hi = tmp0[0] + tmp0[1] + tmp1[0] + tmp1[1];
+
+	return sum + (sum_hi << 32);
+}
+#endif
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+static u64 poly_mul_sum4_neon(const u64 s[4], const u32 r[4])
+{
+	u32 s_lo[4] = {(u32)s[0], (u32)s[1], (u32)s[2], (u32)s[3]};
+	u32 s_hi[4] = {
+		(u32)(s[0] >> 32), (u32)(s[1] >> 32),
+		(u32)(s[2] >> 32), (u32)(s[3] >> 32),
+	};
+	uint32x4_t vs_lo = vld1q_u32(s_lo);
+	uint32x4_t vr    = vld1q_u32(r);
+	uint64x2_t prod_lo = vmull_u32(vget_low_u32(vs_lo), vget_low_u32(vr));
+	uint64x2_t prod_hi = vmull_u32(vget_high_u32(vs_lo), vget_high_u32(vr));
+	u64 sum = vgetq_lane_u64(prod_lo, 0) + vgetq_lane_u64(prod_lo, 1) +
+	          vgetq_lane_u64(prod_hi, 0) + vgetq_lane_u64(prod_hi, 1);
+
+	uint32x4_t vs_hi = vld1q_u32(s_hi);
+	prod_lo = vmull_u32(vget_low_u32(vs_hi), vget_low_u32(vr));
+	prod_hi = vmull_u32(vget_high_u32(vs_hi), vget_high_u32(vr));
+	u64 sum_hi = vgetq_lane_u64(prod_lo, 0) + vgetq_lane_u64(prod_lo, 1) +
+	             vgetq_lane_u64(prod_hi, 0) + vgetq_lane_u64(prod_hi, 1);
+
+	return sum + (sum_hi << 32);
+}
+#endif
+
 // h = (h + c) * r
 // preconditions:
 //   ctx->h <= 4_ffffffff_ffffffff_ffffffff_ffffffff
@@ -546,19 +1065,65 @@ static void poly_blocks(crypto_poly1305_ctx *ctx, const u8 *in,
 	u32 h4 = ctx->h[4];
 
 	FOR (i, 0, nb_blocks) {
+		u32 m[4];
+		poly_load32x4(in, m);
+		in += 16;
 		// h + c, without carry propagation
-		const u64 s0 = (u64)h0 + load32_le(in);  in += 4;
-		const u64 s1 = (u64)h1 + load32_le(in);  in += 4;
-		const u64 s2 = (u64)h2 + load32_le(in);  in += 4;
-		const u64 s3 = (u64)h3 + load32_le(in);  in += 4;
+		const u64 s0 = (u64)h0 + m[0];
+		const u64 s1 = (u64)h1 + m[1];
+		const u64 s2 = (u64)h2 + m[2];
+		const u64 s3 = (u64)h3 + m[3];
 		const u32 s4 =      h4 + end;
 
 		// (h + c) * r, without carry propagation
-		const u64 x0 = s0*r0+ s1*rr3+ s2*rr2+ s3*rr1+ s4*rr0;
-		const u64 x1 = s0*r1+ s1*r0 + s2*rr3+ s3*rr2+ s4*rr1;
-		const u64 x2 = s0*r2+ s1*r1 + s2*r0 + s3*rr3+ s4*rr2;
-		const u64 x3 = s0*r3+ s1*r2 + s2*r1 + s3*r0 + s4*rr3;
-		const u32 x4 =                                s4*rr4;
+		u64 x0 = 0;
+		u64 x1 = 0;
+		u64 x2 = 0;
+		u64 x3 = 0;
+		const u64 s_vec[4] = {s0, s1, s2, s3};
+		const u32 r_vec0[4] = {r0, rr3, rr2, rr1};
+		const u32 r_vec1[4] = {r1, r0 , rr3, rr2};
+		const u32 r_vec2[4] = {r2, r1 , r0 , rr3};
+		const u32 r_vec3[4] = {r3, r2 , r1 , r0 };
+		int simd_done = 0;
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+		if (mono_have_avx2_cached()) {
+			poly_mul_sum4x2_avx2(s_vec, r_vec0, r_vec1, &x0, &x1);
+			poly_mul_sum4x2_avx2(s_vec, r_vec2, r_vec3, &x2, &x3);
+			simd_done = 1;
+		} else
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+		if (mono_have_sse2_cached()) {
+			x0 = poly_mul_sum4_sse2(s_vec, r_vec0);
+			x1 = poly_mul_sum4_sse2(s_vec, r_vec1);
+			x2 = poly_mul_sum4_sse2(s_vec, r_vec2);
+			x3 = poly_mul_sum4_sse2(s_vec, r_vec3);
+			simd_done = 1;
+		}
+#endif
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+		if (!simd_done && mono_have_neon_cached()) {
+			x0 = poly_mul_sum4_neon(s_vec, r_vec0);
+			x1 = poly_mul_sum4_neon(s_vec, r_vec1);
+			x2 = poly_mul_sum4_neon(s_vec, r_vec2);
+			x3 = poly_mul_sum4_neon(s_vec, r_vec3);
+			simd_done = 1;
+		}
+#endif
+		if (!simd_done) {
+			x0 = poly_mul_sum4_scalar(s_vec, r_vec0);
+			x1 = poly_mul_sum4_scalar(s_vec, r_vec1);
+			x2 = poly_mul_sum4_scalar(s_vec, r_vec2);
+			x3 = poly_mul_sum4_scalar(s_vec, r_vec3);
+		}
+		x0 += (u64)s4 * rr0;
+		x1 += (u64)s4 * rr1;
+		x2 += (u64)s4 * rr2;
+		x3 += (u64)s4 * rr3;
+		const u32 x4 = s4 * rr4;
 
 		// partial reduction modulo 2^130 - 5
 		const u32 u5 = x4 + (x3 >> 32); // u5 <= 7ffffff5
@@ -2274,14 +2839,300 @@ static const fe A2      = {
 static void fe_0(fe h) {           ZERO(h  , 10); }
 static void fe_1(fe h) { h[0] = 1; ZERO(h+1,  9); }
 
-static void fe_copy(fe h,const fe f           ){FOR(i,0,10) h[i] =  f[i];      }
-static void fe_neg (fe h,const fe f           ){FOR(i,0,10) h[i] = -f[i];      }
-static void fe_add (fe h,const fe f,const fe g){FOR(i,0,10) h[i] = f[i] + g[i];}
-static void fe_sub (fe h,const fe f,const fe g){FOR(i,0,10) h[i] = f[i] - g[i];}
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
+static void fe_copy_avx2(fe h, const fe f)
+{
+	int i = 0;
+	for (; i + 7 < 10; i += 8) {
+		__m256i v = _mm256_loadu_si256((const __m256i*)&f[i]);
+		_mm256_storeu_si256((__m256i*)&h[i], v);
+	}
+	for (; i < 10; i++) {
+		h[i] = f[i];
+	}
+}
+
+MONO_TARGET_AVX2
+static void fe_neg_avx2(fe h, const fe f)
+{
+	const __m256i zero = _mm256_setzero_si256();
+	int i = 0;
+	for (; i + 7 < 10; i += 8) {
+		__m256i v = _mm256_loadu_si256((const __m256i*)&f[i]);
+		v = _mm256_sub_epi32(zero, v);
+		_mm256_storeu_si256((__m256i*)&h[i], v);
+	}
+	for (; i < 10; i++) {
+		h[i] = -f[i];
+	}
+}
+
+MONO_TARGET_AVX2
+static void fe_add_avx2(fe h, const fe f, const fe g)
+{
+	int i = 0;
+	for (; i + 7 < 10; i += 8) {
+		__m256i vf = _mm256_loadu_si256((const __m256i*)&f[i]);
+		__m256i vg = _mm256_loadu_si256((const __m256i*)&g[i]);
+		__m256i v = _mm256_add_epi32(vf, vg);
+		_mm256_storeu_si256((__m256i*)&h[i], v);
+	}
+	for (; i < 10; i++) {
+		h[i] = f[i] + g[i];
+	}
+}
+
+MONO_TARGET_AVX2
+static void fe_sub_avx2(fe h, const fe f, const fe g)
+{
+	int i = 0;
+	for (; i + 7 < 10; i += 8) {
+		__m256i vf = _mm256_loadu_si256((const __m256i*)&f[i]);
+		__m256i vg = _mm256_loadu_si256((const __m256i*)&g[i]);
+		__m256i v = _mm256_sub_epi32(vf, vg);
+		_mm256_storeu_si256((__m256i*)&h[i], v);
+	}
+	for (; i < 10; i++) {
+		h[i] = f[i] - g[i];
+	}
+}
+#endif
+
+static void fe_copy(fe h, const fe f)
+{
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_copy_avx2(h, f);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			__m128i v = _mm_loadu_si128((const __m128i*)&f[i]);
+			_mm_storeu_si128((__m128i*)&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = f[i];
+		}
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			int32x4_t v = vld1q_s32(&f[i]);
+			vst1q_s32(&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = f[i];
+		}
+		return;
+	}
+#endif
+	FOR(i, 0, 10) { h[i] = f[i]; }
+}
+
+static void fe_neg(fe h, const fe f)
+{
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_neg_avx2(h, f);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		const __m128i zero = _mm_setzero_si128();
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			__m128i v = _mm_loadu_si128((const __m128i*)&f[i]);
+			v = _mm_sub_epi32(zero, v);
+			_mm_storeu_si128((__m128i*)&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = -f[i];
+		}
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			int32x4_t v = vld1q_s32(&f[i]);
+			v = vnegq_s32(v);
+			vst1q_s32(&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = -f[i];
+		}
+		return;
+	}
+#endif
+	FOR(i, 0, 10) { h[i] = -f[i]; }
+}
+
+static void fe_add(fe h, const fe f, const fe g)
+{
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_add_avx2(h, f, g);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			__m128i vf = _mm_loadu_si128((const __m128i*)&f[i]);
+			__m128i vg = _mm_loadu_si128((const __m128i*)&g[i]);
+			__m128i v = _mm_add_epi32(vf, vg);
+			_mm_storeu_si128((__m128i*)&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = f[i] + g[i];
+		}
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			int32x4_t vf = vld1q_s32(&f[i]);
+			int32x4_t vg = vld1q_s32(&g[i]);
+			int32x4_t v = vaddq_s32(vf, vg);
+			vst1q_s32(&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = f[i] + g[i];
+		}
+		return;
+	}
+#endif
+	FOR(i, 0, 10) { h[i] = f[i] + g[i]; }
+}
+
+static void fe_sub(fe h, const fe f, const fe g)
+{
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_sub_avx2(h, f, g);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			__m128i vf = _mm_loadu_si128((const __m128i*)&f[i]);
+			__m128i vg = _mm_loadu_si128((const __m128i*)&g[i]);
+			__m128i v = _mm_sub_epi32(vf, vg);
+			_mm_storeu_si128((__m128i*)&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = f[i] - g[i];
+		}
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			int32x4_t vf = vld1q_s32(&f[i]);
+			int32x4_t vg = vld1q_s32(&g[i]);
+			int32x4_t v = vsubq_s32(vf, vg);
+			vst1q_s32(&h[i], v);
+		}
+		for (; i < 10; i++) {
+			h[i] = f[i] - g[i];
+		}
+		return;
+	}
+#endif
+	FOR(i, 0, 10) { h[i] = f[i] - g[i]; }
+}
+
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+MONO_TARGET_AVX2
+static void fe_cswap_avx2(fe f, fe g, int b)
+{
+	i32 mask = -b;
+	__m256i m = _mm256_set1_epi32(mask);
+	int i = 0;
+	for (; i + 7 < 10; i += 8) {
+		__m256i vf = _mm256_loadu_si256((const __m256i*)&f[i]);
+		__m256i vg = _mm256_loadu_si256((const __m256i*)&g[i]);
+		__m256i x = _mm256_and_si256(_mm256_xor_si256(vf, vg), m);
+		vf = _mm256_xor_si256(vf, x);
+		vg = _mm256_xor_si256(vg, x);
+		_mm256_storeu_si256((__m256i*)&f[i], vf);
+		_mm256_storeu_si256((__m256i*)&g[i], vg);
+	}
+	for (; i < 10; i++) {
+		i32 x = (f[i] ^ g[i]) & mask;
+		f[i] = f[i] ^ x;
+		g[i] = g[i] ^ x;
+	}
+}
+#endif
 
 static void fe_cswap(fe f, fe g, int b)
 {
 	i32 mask = -b; // -1 = 0xffffffff
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_cswap_avx2(f, g, b);
+		return;
+	}
+#endif
+#if defined(MONO_HAS_SSE2) && MONO_HAS_SSE2
+	if (mono_have_sse2_cached()) {
+		__m128i m = _mm_set1_epi32(mask);
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			__m128i vf = _mm_loadu_si128((const __m128i*)&f[i]);
+			__m128i vg = _mm_loadu_si128((const __m128i*)&g[i]);
+			__m128i x = _mm_and_si128(_mm_xor_si128(vf, vg), m);
+			vf = _mm_xor_si128(vf, x);
+			vg = _mm_xor_si128(vg, x);
+			_mm_storeu_si128((__m128i*)&f[i], vf);
+			_mm_storeu_si128((__m128i*)&g[i], vg);
+		}
+		for (; i < 10; i++) {
+			i32 x = (f[i] ^ g[i]) & mask;
+			f[i] = f[i] ^ x;
+			g[i] = g[i] ^ x;
+		}
+		return;
+	}
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+	if (mono_have_neon_cached()) {
+		int32x4_t m = vdupq_n_s32(mask);
+		int i = 0;
+		for (; i + 3 < 10; i += 4) {
+			int32x4_t vf = vld1q_s32(&f[i]);
+			int32x4_t vg = vld1q_s32(&g[i]);
+			int32x4_t x = vandq_s32(veorq_s32(vf, vg), m);
+			vf = veorq_s32(vf, x);
+			vg = veorq_s32(vg, x);
+			vst1q_s32(&f[i], vf);
+			vst1q_s32(&g[i], vg);
+		}
+		for (; i < 10; i++) {
+			i32 x = (f[i] ^ g[i]) & mask;
+			f[i] = f[i] ^ x;
+			g[i] = g[i] ^ x;
+		}
+		return;
+	}
+#endif
 	FOR (i, 0, 10) {
 		i32 x = (f[i] ^ g[i]) & mask;
 		f[i] = f[i] ^ x;
@@ -2292,6 +3143,24 @@ static void fe_cswap(fe f, fe g, int b)
 static void fe_ccopy(fe f, const fe g, int b)
 {
 	i32 mask = -b; // -1 = 0xffffffff
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		__m256i m = _mm256_set1_epi32(mask);
+		int i = 0;
+		for (; i + 7 < 10; i += 8) {
+			__m256i vf = _mm256_loadu_si256((const __m256i*)&f[i]);
+			__m256i vg = _mm256_loadu_si256((const __m256i*)&g[i]);
+			__m256i x = _mm256_and_si256(_mm256_xor_si256(vf, vg), m);
+			vf = _mm256_xor_si256(vf, x);
+			_mm256_storeu_si256((__m256i*)&f[i], vf);
+		}
+		for (; i < 10; i++) {
+			i32 x = (f[i] ^ g[i]) & mask;
+			f[i] = f[i] ^ x;
+		}
+		return;
+	}
+#endif
 	FOR (i, 0, 10) {
 		i32 x = (f[i] ^ g[i]) & mask;
 		f[i] = f[i] ^ x;
@@ -2509,6 +3378,25 @@ static void fe_tobytes(u8 s[32], const fe h)
 //   |g1|, |g3|, |g5|, |g7|, |g9|  <  1.65 * 2^25
 static void fe_mul_small(fe h, const fe f, i32 g)
 {
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		__m256i vg = _mm256_set1_epi32(g);
+		__m256i vf = _mm256_loadu_si256((const __m256i*)f);
+		__m256i prod_even = _mm256_mul_epi32(vf, vg);
+		__m256i vf_odd = _mm256_srli_si256(vf, 4);
+		__m256i prod_odd = _mm256_mul_epi32(vf_odd, vg);
+		i64 even[4];
+		i64 odd[4];
+		_mm256_storeu_si256((__m256i*)even, prod_even);
+		_mm256_storeu_si256((__m256i*)odd , prod_odd);
+		i64 t0 = even[0]; i64 t2 = even[1]; i64 t4 = even[2]; i64 t6 = even[3];
+		i64 t1 = odd[0];  i64 t3 = odd[1];  i64 t5 = odd[2];  i64 t7 = odd[3];
+		i64 t8 = f[8] * (i64)g;
+		i64 t9 = f[9] * (i64)g;
+		FE_CARRY; // Carry precondition OK
+		return;
+	}
+#endif
 	i64 t0 = f[0] * (i64) g;  i64 t1 = f[1] * (i64) g;
 	i64 t2 = f[2] * (i64) g;  i64 t3 = f[3] * (i64) g;
 	i64 t4 = f[4] * (i64) g;  i64 t5 = f[5] * (i64) g;
@@ -2527,8 +3415,68 @@ static void fe_mul_small(fe h, const fe f, i32 g)
 //
 //   |g0|, |g2|, |g4|, |g6|, |g8|  <  1.65 * 2^26
 //   |g1|, |g3|, |g5|, |g7|, |g9|  <  1.65 * 2^25
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+// AVX2-targeted clone to enable compiler auto-vectorization.
+MONO_TARGET_AVX2
+static void fe_mul_avx2(fe h, const fe f, const fe g)
+{
+	// Everything is unrolled and put in temporary variables.
+	// We could roll the loop, but that would make curve25519 twice as slow.
+	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
+	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
+	i32 g0 = g[0]; i32 g1 = g[1]; i32 g2 = g[2]; i32 g3 = g[3]; i32 g4 = g[4];
+	i32 g5 = g[5]; i32 g6 = g[6]; i32 g7 = g[7]; i32 g8 = g[8]; i32 g9 = g[9];
+	i32 F1 = f1*2; i32 F3 = f3*2; i32 F5 = f5*2; i32 F7 = f7*2; i32 F9 = f9*2;
+	i32 G1 = g1*19;  i32 G2 = g2*19;  i32 G3 = g3*19;
+	i32 G4 = g4*19;  i32 G5 = g5*19;  i32 G6 = g6*19;
+	i32 G7 = g7*19;  i32 G8 = g8*19;  i32 G9 = g9*19;
+	// |F1|, |F3|, |F5|, |F7|, |F9|  <  1.65 * 2^26
+	// |G0|, |G2|, |G4|, |G6|, |G8|  <  2^31
+	// |G1|, |G3|, |G5|, |G7|, |G9|  <  2^30
+
+	i64 t0 = f0*(i64)g0 + F1*(i64)G9 + f2*(i64)G8 + F3*(i64)G7 + f4*(i64)G6
+	       + F5*(i64)G5 + f6*(i64)G4 + F7*(i64)G3 + f8*(i64)G2 + F9*(i64)G1;
+	i64 t1 = f0*(i64)g1 + f1*(i64)g0 + f2*(i64)G9 + f3*(i64)G8 + f4*(i64)G7
+	       + f5*(i64)G6 + f6*(i64)G5 + f7*(i64)G4 + f8*(i64)G3 + f9*(i64)G2;
+	i64 t2 = f0*(i64)g2 + F1*(i64)g1 + f2*(i64)g0 + F3*(i64)G9 + f4*(i64)G8
+	       + F5*(i64)G7 + f6*(i64)G6 + F7*(i64)G5 + f8*(i64)G4 + F9*(i64)G3;
+	i64 t3 = f0*(i64)g3 + f1*(i64)g2 + f2*(i64)g1 + f3*(i64)g0 + f4*(i64)G9
+	       + f5*(i64)G8 + f6*(i64)G7 + f7*(i64)G6 + f8*(i64)G5 + f9*(i64)G4;
+	i64 t4 = f0*(i64)g4 + F1*(i64)g3 + f2*(i64)g2 + F3*(i64)g1 + f4*(i64)g0
+	       + F5*(i64)G9 + f6*(i64)G8 + F7*(i64)G7 + f8*(i64)G6 + F9*(i64)G5;
+	i64 t5 = f0*(i64)g5 + f1*(i64)g4 + f2*(i64)g3 + f3*(i64)g2 + f4*(i64)g1
+	       + f5*(i64)g0 + f6*(i64)G9 + f7*(i64)G8 + f8*(i64)G7 + f9*(i64)G6;
+	i64 t6 = f0*(i64)g6 + F1*(i64)g5 + f2*(i64)g4 + F3*(i64)g3 + f4*(i64)g2
+	       + F5*(i64)g1 + f6*(i64)g0 + F7*(i64)G9 + f8*(i64)G8 + F9*(i64)G7;
+	i64 t7 = f0*(i64)g7 + f1*(i64)g6 + f2*(i64)g5 + f3*(i64)g4 + f4*(i64)g3
+	       + f5*(i64)g2 + f6*(i64)g1 + f7*(i64)g0 + f8*(i64)G9 + f9*(i64)G8;
+	i64 t8 = f0*(i64)g8 + F1*(i64)g7 + f2*(i64)g6 + F3*(i64)g5 + f4*(i64)g4
+	       + F5*(i64)g3 + f6*(i64)g2 + F7*(i64)g1 + f8*(i64)g0 + F9*(i64)G9;
+	i64 t9 = f0*(i64)g9 + f1*(i64)g8 + f2*(i64)g7 + f3*(i64)g6 + f4*(i64)g5
+	       + f5*(i64)g4 + f6*(i64)g3 + f7*(i64)g2 + f8*(i64)g1 + f9*(i64)g0;
+	// t0 < 0.67 * 2^61
+	// t1 < 0.41 * 2^61
+	// t2 < 0.52 * 2^61
+	// t3 < 0.32 * 2^61
+	// t4 < 0.38 * 2^61
+	// t5 < 0.22 * 2^61
+	// t6 < 0.23 * 2^61
+	// t7 < 0.13 * 2^61
+	// t8 < 0.09 * 2^61
+	// t9 < 0.03 * 2^61
+
+	FE_CARRY; // Everything below 2^62, Carry precondition OK
+}
+#endif
+
 static void fe_mul(fe h, const fe f, const fe g)
 {
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_mul_avx2(h, f, g);
+		return;
+	}
+#endif
 	// Everything is unrolled and put in temporary variables.
 	// We could roll the loop, but that would make curve25519 twice as slow.
 	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
@@ -2583,8 +3531,64 @@ static void fe_mul(fe h, const fe f, const fe g)
 //   |f1|, |f3|, |f5|, |f7|, |f9|  <  1.65 * 2^25
 //
 // Note: we could use fe_mul() for this, but this is significantly faster
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+// AVX2-targeted clone to enable compiler auto-vectorization.
+MONO_TARGET_AVX2
+static void fe_sq_avx2(fe h, const fe f)
+{
+	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
+	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
+	i32 f0_2  = f0*2;   i32 f1_2  = f1*2;   i32 f2_2  = f2*2;   i32 f3_2 = f3*2;
+	i32 f4_2  = f4*2;   i32 f5_2  = f5*2;   i32 f6_2  = f6*2;   i32 f7_2 = f7*2;
+	i32 f5_38 = f5*38;  i32 f6_19 = f6*19;  i32 f7_38 = f7*38;
+	i32 f8_19 = f8*19;  i32 f9_38 = f9*38;
+	// |f0_2| , |f2_2| , |f4_2| , |f6_2| , |f8_2|  <  1.65 * 2^27
+	// |f1_2| , |f3_2| , |f5_2| , |f7_2| , |f9_2|  <  1.65 * 2^26
+	// |f5_38|, |f6_19|, |f7_38|, |f8_19|, |f9_38| <  2^31
+
+	i64 t0 = f0  *(i64)f0    + f1_2*(i64)f9_38 + f2_2*(i64)f8_19
+	       + f3_2*(i64)f7_38 + f4_2*(i64)f6_19 + f5  *(i64)f5_38;
+	i64 t1 = f0_2*(i64)f1    + f2  *(i64)f9_38 + f3_2*(i64)f8_19
+	       + f4  *(i64)f7_38 + f5_2*(i64)f6_19;
+	i64 t2 = f0_2*(i64)f2    + f1_2*(i64)f1    + f3_2*(i64)f9_38
+	       + f4_2*(i64)f8_19 + f5_2*(i64)f7_38 + f6  *(i64)f6_19;
+	i64 t3 = f0_2*(i64)f3    + f1_2*(i64)f2    + f4  *(i64)f9_38
+	       + f5_2*(i64)f8_19 + f6  *(i64)f7_38;
+	i64 t4 = f0_2*(i64)f4    + f1_2*(i64)f3_2  + f2  *(i64)f2
+	       + f5_2*(i64)f9_38 + f6_2*(i64)f8_19 + f7  *(i64)f7_38;
+	i64 t5 = f0_2*(i64)f5    + f1_2*(i64)f4    + f2_2*(i64)f3
+	       + f6  *(i64)f9_38 + f7_2*(i64)f8_19;
+	i64 t6 = f0_2*(i64)f6    + f1_2*(i64)f5_2  + f2_2*(i64)f4
+	       + f3_2*(i64)f3    + f7_2*(i64)f9_38 + f8  *(i64)f8_19;
+	i64 t7 = f0_2*(i64)f7    + f1_2*(i64)f6    + f2_2*(i64)f5
+	       + f3_2*(i64)f4    + f8  *(i64)f9_38;
+	i64 t8 = f0_2*(i64)f8    + f1_2*(i64)f7_2  + f2_2*(i64)f6
+	       + f3_2*(i64)f5_2  + f4  *(i64)f4    + f9  *(i64)f9_38;
+	i64 t9 = f0_2*(i64)f9    + f1_2*(i64)f8    + f2_2*(i64)f7
+	       + f3_2*(i64)f6    + f4  *(i64)f5_2;
+	// t0 < 0.67 * 2^61
+	// t1 < 0.41 * 2^61
+	// t2 < 0.52 * 2^61
+	// t3 < 0.32 * 2^61
+	// t4 < 0.38 * 2^61
+	// t5 < 0.22 * 2^61
+	// t6 < 0.23 * 2^61
+	// t7 < 0.13 * 2^61
+	// t8 < 0.09 * 2^61
+	// t9 < 0.03 * 2^61
+
+	FE_CARRY;
+}
+#endif
+
 static void fe_sq(fe h, const fe f)
 {
+#if defined(MONO_HAS_AVX2) && MONO_HAS_AVX2
+	if (mono_have_avx2_cached()) {
+		fe_sq_avx2(h, f);
+		return;
+	}
+#endif
 	i32 f0 = f[0]; i32 f1 = f[1]; i32 f2 = f[2]; i32 f3 = f[3]; i32 f4 = f[4];
 	i32 f5 = f[5]; i32 f6 = f[6]; i32 f7 = f[7]; i32 f8 = f[8]; i32 f9 = f[9];
 	i32 f0_2  = f0*2;   i32 f1_2  = f1*2;   i32 f2_2  = f2*2;   i32 f3_2 = f3*2;
