@@ -43,3 +43,7 @@ Policy
 
 New public APIs should include a checked variant unless there is a clear
 reason not to. Documentation should call out expected error codes.
+Any new or modified functionality must include strong error handling and
+tests that exercise both success paths and error paths.
+Documentation should be updated alongside code changes and kept current.
+All work must remain open source.
