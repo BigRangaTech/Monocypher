@@ -65,6 +65,8 @@ PORTABLE     ?= 1
 HARDEN       ?= 0
 SANITIZE     ?=
 SIZE         ?= 0
+STRERROR     ?= 0
+RNG_DIAGNOSTICS ?= 0
 ARGON2_THREADS ?= 0
 BLAKE3_THREADS ?= 0
 CHACHA20_THREADS ?= 0
@@ -95,6 +97,14 @@ endif
 
 ifeq ($(SIZE),1)
 CFLAGS       += -Os -DBLAKE2_NO_UNROLLING
+endif
+
+ifeq ($(STRERROR),1)
+CFLAGS       += -DMONOCYPHER_STRERROR=1
+endif
+
+ifeq ($(RNG_DIAGNOSTICS),1)
+CFLAGS       += -DMONOCYPHER_RNG_DIAGNOSTICS=1
 endif
 
 ifeq ($(ARGON2_THREADS),1)

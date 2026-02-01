@@ -65,6 +65,11 @@ Manual
 The manual can be found at https://monocypher.org/manual/, and in the
 `doc/` folder.
 
+Fork docs:
+
+- `TOOLING.md` for tests, coverage, fuzzing, and toolchain setup.
+- `ERROR_HANDLING.md` for the checked-API/error handling roadmap.
+
 
 Installation
 ------------
@@ -103,6 +108,9 @@ Build profiles:
   (POSIX-only; falls back to single-threaded on Windows).
 - `CHACHA20_THREADS=1` enables pthread-based parallel ChaCha20 for large
   buffers (POSIX-only; falls back to single-threaded on Windows).
+- `STRERROR=1` enables `crypto_strerror` (string names for `crypto_err`).
+- `RNG_DIAGNOSTICS=1` enables `crypto_random_last_error` for OS RNG
+  diagnostics (platform-specific error codes).
 
 ### Option 3: install it on your system
 

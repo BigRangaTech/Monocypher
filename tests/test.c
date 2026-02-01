@@ -119,6 +119,19 @@ static void test_checked(void)
 	printf("\tChecked API\n");
 	u8 hash32[32];
 	u8 hash64[64];
+	u8 key32[32] = {0};
+	u8 nonce24[24] = {0};
+	u8 nonce12[12] = {0};
+	u8 nonce8[8] = {0};
+	u8 in16[16] = {0};
+	crypto_aead_ctx aead_ctx;
+	crypto_blake2b_ctx blake2b_ctx;
+	crypto_sha256_ctx sha256_ctx;
+	crypto_sha256_hmac_ctx hmac_ctx;
+	crypto_sha512_ctx sha512_ctx;
+	crypto_sha512_hmac_ctx sha512_hmac_ctx;
+	crypto_blake3_ctx blake3_ctx;
+	crypto_poly1305_ctx poly_ctx;
 
 	ASSERT(crypto_sha256_checked(hash32, 0, 0) == CRYPTO_OK);
 	ASSERT(crypto_sha256_checked(0, 0, 0) == CRYPTO_ERR_NULL);
@@ -130,6 +143,138 @@ static void test_checked(void)
 	ASSERT(crypto_random(0, 0) == CRYPTO_OK);
 	ASSERT(crypto_random(0, 1) == CRYPTO_ERR_NULL);
 	ASSERT(crypto_random(hash32, 1) == CRYPTO_OK);
+	ASSERT(crypto_aead_init_x_checked(0, key32, nonce24) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_aead_init_x_checked(&aead_ctx, key32, nonce24) == CRYPTO_OK);
+	ASSERT(crypto_aead_init_djb_checked(&aead_ctx, key32, nonce8) == CRYPTO_OK);
+	ASSERT(crypto_aead_init_ietf_checked(&aead_ctx, key32, nonce12) == CRYPTO_OK);
+	ASSERT(crypto_chacha20_h_checked(0, key32, in16) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_chacha20_h_checked(hash32, key32, in16) == CRYPTO_OK);
+	ASSERT(crypto_x25519_inverse_checked(0, key32, key32) == CRYPTO_ERR_NULL);
+
+	ASSERT(crypto_blake2b_init_checked(0, 64) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake2b_init_checked(&blake2b_ctx, 0) == CRYPTO_ERR_SIZE);
+	ASSERT(crypto_blake2b_keyed_init_checked(&blake2b_ctx, 64, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake2b_init_checked(&blake2b_ctx, 64) == CRYPTO_OK);
+	ASSERT(crypto_blake2b_update_checked(&blake2b_ctx, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_blake2b_update_checked(&blake2b_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake2b_final_checked(&blake2b_ctx, hash64) == CRYPTO_OK);
+
+	ASSERT(crypto_sha256_init_checked(0) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha256_init_checked(&sha256_ctx) == CRYPTO_OK);
+	ASSERT(crypto_sha256_update_checked(&sha256_ctx, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_sha256_update_checked(&sha256_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha256_final_checked(&sha256_ctx, hash32) == CRYPTO_OK);
+
+	ASSERT(crypto_sha256_hmac_init_checked(0, key32, 32) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha256_hmac_init_checked(&hmac_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha256_hmac_init_checked(&hmac_ctx, key32, 32)
+	       == CRYPTO_OK);
+	ASSERT(crypto_sha256_hmac_update_checked(&hmac_ctx, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_sha256_hmac_update_checked(&hmac_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha256_hmac_final_checked(&hmac_ctx, hash32) == CRYPTO_OK);
+	ASSERT(crypto_sha256_hkdf_expand_checked(hash32, 32 * 255 + 1,
+	                                         hash32, 32, 0, 0)
+	       == CRYPTO_ERR_SIZE);
+
+	ASSERT(crypto_sha512_checked(hash64, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_sha512_checked(0, 0, 0) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha512_init_checked(0) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha512_init_checked(&sha512_ctx) == CRYPTO_OK);
+	ASSERT(crypto_sha512_update_checked(&sha512_ctx, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_sha512_update_checked(&sha512_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha512_final_checked(&sha512_ctx, hash64) == CRYPTO_OK);
+	ASSERT(crypto_sha512_hmac_init_checked(0, key32, 32)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha512_hmac_init_checked(&sha512_hmac_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha512_hmac_init_checked(&sha512_hmac_ctx, key32, 32)
+	       == CRYPTO_OK);
+	ASSERT(crypto_sha512_hmac_update_checked(&sha512_hmac_ctx, 0, 0)
+	       == CRYPTO_OK);
+	ASSERT(crypto_sha512_hmac_update_checked(&sha512_hmac_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_sha512_hmac_final_checked(&sha512_hmac_ctx, hash64)
+	       == CRYPTO_OK);
+	ASSERT(crypto_sha512_hkdf_expand_checked(hash64, 64 * 255 + 1,
+	                                         hash64, 64, 0, 0)
+	       == CRYPTO_ERR_SIZE);
+
+	ASSERT(crypto_blake3_init_checked(0) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake3_init_checked(&blake3_ctx) == CRYPTO_OK);
+	ASSERT(crypto_blake3_update_checked(&blake3_ctx, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_blake3_update_checked(&blake3_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake3_final_seek_checked(&blake3_ctx, 0, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_blake3_final_checked(&blake3_ctx, hash32, 32) == CRYPTO_OK);
+
+	ASSERT(crypto_poly1305_init_checked(0, key32) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_poly1305_init_checked(&poly_ctx, key32) == CRYPTO_OK);
+	ASSERT(crypto_poly1305_update_checked(&poly_ctx, 0, 0) == CRYPTO_OK);
+	ASSERT(crypto_poly1305_update_checked(&poly_ctx, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_poly1305_final_checked(&poly_ctx, hash32) == CRYPTO_OK);
+
+	u8 msg16[16] = {0};
+	u8 ed_seed[32] = {0};
+	u8 ed_sk[64];
+	u8 ed_pk[32];
+	u8 ed_sig[64];
+	u8 ed_digest[64];
+	ASSERT(crypto_ed25519_key_pair_checked(0, ed_pk, ed_seed)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_key_pair_checked(ed_sk, 0, ed_seed)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_key_pair_checked(ed_sk, ed_pk, 0)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_key_pair_checked(ed_sk, ed_pk, ed_seed)
+	       == CRYPTO_OK);
+	ASSERT(crypto_ed25519_sign_checked(0, ed_sk, msg16, sizeof(msg16))
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_sign_checked(ed_sig, 0, msg16, sizeof(msg16))
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_sign_checked(ed_sig, ed_sk, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_sign_checked(ed_sig, ed_sk, msg16, sizeof(msg16))
+	       == CRYPTO_OK);
+	ASSERT(crypto_ed25519_check_checked(0, ed_pk, msg16, sizeof(msg16))
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_check_checked(ed_sig, 0, msg16, sizeof(msg16))
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_check_checked(ed_sig, ed_pk, 0, 1)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_check_checked(ed_sig, ed_pk, msg16, sizeof(msg16))
+	       == CRYPTO_OK);
+	ed_sig[0] ^= 1;
+	ASSERT(crypto_ed25519_check_checked(ed_sig, ed_pk, msg16, sizeof(msg16))
+	       == CRYPTO_ERR_AUTH);
+
+	crypto_sha512(ed_digest, msg16, sizeof(msg16));
+	ASSERT(crypto_ed25519_ph_sign_checked(0, ed_sk, ed_digest)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_ph_sign_checked(ed_sig, 0, ed_digest)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_ph_sign_checked(ed_sig, ed_sk, 0)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_ph_sign_checked(ed_sig, ed_sk, ed_digest)
+	       == CRYPTO_OK);
+	ASSERT(crypto_ed25519_ph_check_checked(0, ed_pk, ed_digest)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_ph_check_checked(ed_sig, 0, ed_digest)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_ph_check_checked(ed_sig, ed_pk, 0)
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_ed25519_ph_check_checked(ed_sig, ed_pk, ed_digest)
+	       == CRYPTO_OK);
+	ed_sig[0] ^= 1;
+	ASSERT(crypto_ed25519_ph_check_checked(ed_sig, ed_pk, ed_digest)
+	       == CRYPTO_ERR_AUTH);
 
 	u8 a16[16] = {0};
 	u8 b16[16] = {0};

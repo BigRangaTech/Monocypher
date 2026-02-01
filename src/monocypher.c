@@ -260,6 +260,21 @@ static int checked_mul_size(size_t a, size_t b, size_t *out)
 	return CRYPTO_OK;
 }
 
+#if defined(MONOCYPHER_STRERROR) && MONOCYPHER_STRERROR
+const char *crypto_strerror(int err)
+{
+	switch (err) {
+	case CRYPTO_OK:           return "CRYPTO_OK";
+	case CRYPTO_ERR_NULL:     return "CRYPTO_ERR_NULL";
+	case CRYPTO_ERR_SIZE:     return "CRYPTO_ERR_SIZE";
+	case CRYPTO_ERR_OVERFLOW: return "CRYPTO_ERR_OVERFLOW";
+	case CRYPTO_ERR_AUTH:     return "CRYPTO_ERR_AUTH";
+	case CRYPTO_ERR_CONFIG:   return "CRYPTO_ERR_CONFIG";
+	default:                  return "CRYPTO_ERR_UNKNOWN";
+	}
+}
+#endif
+
 static int neq0(u64 diff)
 {
 	// constant time comparison to zero
@@ -349,10 +364,33 @@ void crypto_wipe(void *secret, size_t size)
 #endif
 }
 
+#if defined(MONOCYPHER_RNG_DIAGNOSTICS) && MONOCYPHER_RNG_DIAGNOSTICS
+static int crypto_rng_last_error = 0;
+
+int crypto_random_last_error(void)
+{
+	return crypto_rng_last_error;
+}
+
+static void crypto_rng_set_error(int err)
+{
+	crypto_rng_last_error = err;
+}
+
+static void crypto_rng_clear_error(void)
+{
+	crypto_rng_last_error = 0;
+}
+#else
+static void crypto_rng_set_error(int err) { (void)err; }
+static void crypto_rng_clear_error(void) { }
+#endif
+
 static int crypto_random_urandom(u8 *out, size_t out_size)
 {
 	int fd = open("/dev/urandom", O_RDONLY);
 	if (fd < 0) {
+		crypto_rng_set_error(errno);
 		return CRYPTO_ERR_CONFIG;
 	}
 	size_t remaining = out_size;
@@ -363,10 +401,12 @@ static int crypto_random_urandom(u8 *out, size_t out_size)
 			if (errno == EINTR) {
 				continue;
 			}
+			crypto_rng_set_error(errno);
 			close(fd);
 			return CRYPTO_ERR_CONFIG;
 		}
 		if (n == 0) {
+			crypto_rng_set_error(EIO);
 			close(fd);
 			return CRYPTO_ERR_CONFIG;
 		}
@@ -379,6 +419,7 @@ static int crypto_random_urandom(u8 *out, size_t out_size)
 
 int crypto_random(u8 *out, size_t out_size)
 {
+	crypto_rng_clear_error();
 	if (out_size == 0) {
 		return CRYPTO_OK;
 	}
@@ -389,8 +430,10 @@ int crypto_random(u8 *out, size_t out_size)
 	if (out_size > ULONG_MAX) {
 		return CRYPTO_ERR_SIZE;
 	}
-	if (BCryptGenRandom(NULL, out, (ULONG)out_size,
-	                    BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+	NTSTATUS status = BCryptGenRandom(NULL, out, (ULONG)out_size,
+	                                  BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+	if (status != 0) {
+		crypto_rng_set_error((int)status);
 		return CRYPTO_ERR_CONFIG;
 	}
 	return CRYPTO_OK;
@@ -410,9 +453,11 @@ int crypto_random(u8 *out, size_t out_size)
 			if (errno == ENOSYS) {
 				return crypto_random_urandom(out, out_size);
 			}
+			crypto_rng_set_error(errno);
 			return CRYPTO_ERR_CONFIG;
 		}
 		if (n == 0) {
+			crypto_rng_set_error(EIO);
 			return CRYPTO_ERR_CONFIG;
 		}
 		p += (size_t)n;
@@ -969,6 +1014,18 @@ void crypto_chacha20_h(u8 out[32], const u8 key[32], const u8 in [16])
 	store32_le_buf(out   , block   , 4); // constant
 	store32_le_buf(out+16, block+12, 4); // counter and nonce
 	WIPE_BUFFER(block);
+}
+
+int crypto_chacha20_h_checked(u8 out[32], const u8 key[32], const u8 in[16])
+{
+	int err = check_out_ptr(out);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(in, 16);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_chacha20_h(out, key, in);
+	return CRYPTO_OK;
 }
 
 #define CHACHA20_THREAD_MIN_BLOCKS 64
@@ -1599,6 +1656,37 @@ void crypto_poly1305_final(crypto_poly1305_ctx *ctx, u8 mac[16])
 	WIPE_CTX(ctx);
 }
 
+int crypto_poly1305_init_checked(crypto_poly1305_ctx *ctx, const u8 key[32])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_poly1305_init(ctx, key);
+	return CRYPTO_OK;
+}
+
+int crypto_poly1305_update_checked(crypto_poly1305_ctx *ctx,
+                                   const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_poly1305_update(ctx, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_poly1305_final_checked(crypto_poly1305_ctx *ctx, u8 mac[16])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(mac);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_poly1305_final(ctx, mac);
+	return CRYPTO_OK;
+}
+
 void crypto_poly1305(u8     mac[16],  const u8 *message,
                      size_t message_size, const u8  key[32])
 {
@@ -1806,6 +1894,57 @@ void crypto_blake2b_final(crypto_blake2b_ctx *ctx, u8 *hash)
 		hash[i] = (ctx->hash[i >> 3] >> (8 * (i & 7))) & 0xff;
 	}
 	WIPE_CTX(ctx);
+}
+
+int crypto_blake2b_init_checked(crypto_blake2b_ctx *ctx, size_t hash_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	if (hash_size == 0 || hash_size > 64) { return CRYPTO_ERR_SIZE; }
+	crypto_blake2b_init(ctx, hash_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake2b_keyed_init_checked(crypto_blake2b_ctx *ctx,
+                                      size_t hash_size,
+                                      const u8 *key, size_t key_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	if (hash_size == 0 || hash_size > 64 || key_size > 64) {
+		return CRYPTO_ERR_SIZE;
+	}
+	err = check_ptr(key, key_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake2b_keyed_init(ctx, hash_size, key, key_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake2b_update_checked(crypto_blake2b_ctx *ctx,
+                                  const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	if (ctx->hash_size == 0 || ctx->hash_size > 64) {
+		return CRYPTO_ERR_SIZE;
+	}
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake2b_update(ctx, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake2b_final_checked(crypto_blake2b_ctx *ctx, u8 *hash)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(hash);
+	if (err != CRYPTO_OK) { return err; }
+	if (ctx->hash_size == 0 || ctx->hash_size > 64) {
+		return CRYPTO_ERR_SIZE;
+	}
+	crypto_blake2b_final(ctx, hash);
+	return CRYPTO_OK;
 }
 
 void crypto_blake2b_keyed(u8 *hash,          size_t hash_size,
@@ -2075,6 +2214,84 @@ void crypto_sha256_hkdf(u8 *okm, size_t okm_size,
 	crypto_sha256_hmac(prk, salt, salt_size, ikm, ikm_size);
 	crypto_sha256_hkdf_expand(okm, okm_size, prk, sizeof(prk), info, info_size);
 	WIPE_BUFFER(prk);
+}
+
+int crypto_sha256_init_checked(crypto_sha256_ctx *ctx)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_init(ctx);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_update_checked(crypto_sha256_ctx *ctx,
+                                 const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_update(ctx, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_final_checked(crypto_sha256_ctx *ctx, u8 hash[32])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(hash);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_final(ctx, hash);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_hmac_init_checked(crypto_sha256_hmac_ctx *ctx,
+                                    const u8 *key, size_t key_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, key_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_hmac_init(ctx, key, key_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_hmac_update_checked(crypto_sha256_hmac_ctx *ctx,
+                                      const u8 *message,
+                                      size_t message_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_hmac_update(ctx, message, message_size);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_hmac_final_checked(crypto_sha256_hmac_ctx *ctx,
+                                     u8 hmac[32])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(hmac);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_hmac_final(ctx, hmac);
+	return CRYPTO_OK;
+}
+
+int crypto_sha256_hkdf_expand_checked(u8 *okm, size_t okm_size,
+                                      const u8 *prk, size_t prk_size,
+                                      const u8 *info, size_t info_size)
+{
+	int err = check_out_ptr(okm);
+	if (err != CRYPTO_OK) { return err; }
+	if (okm_size > 32 * 255) { return CRYPTO_ERR_SIZE; }
+	err = check_ptr(prk, prk_size);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(info, info_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_sha256_hkdf_expand(okm, okm_size, prk, prk_size, info, info_size);
+	return CRYPTO_OK;
 }
 
 int crypto_sha256_checked(u8 hash[32],
@@ -2884,6 +3101,70 @@ void crypto_blake3_final(crypto_blake3_ctx *ctx, u8 *out, size_t out_len)
 {
 	crypto_blake3_final_seek(ctx, 0, out, out_len);
 	WIPE_CTX(ctx);
+}
+
+int crypto_blake3_init_checked(crypto_blake3_ctx *ctx)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_init(ctx);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_keyed_init_checked(crypto_blake3_ctx *ctx,
+                                     const u8 key[BLAKE3_KEY_LEN])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, BLAKE3_KEY_LEN);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_keyed_init(ctx, key);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_derive_key_init_checked(crypto_blake3_ctx *ctx,
+                                          const u8 *context,
+                                          size_t context_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(context, context_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_derive_key_init(ctx, context, context_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_update_checked(crypto_blake3_ctx *ctx,
+                                 const u8 *input, size_t input_size)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(input, input_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_update(ctx, input, input_size);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_final_seek_checked(const crypto_blake3_ctx *ctx, u64 seek,
+                                     u8 *out, size_t out_len)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(out, out_len);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_final_seek(ctx, seek, out, out_len);
+	return CRYPTO_OK;
+}
+
+int crypto_blake3_final_checked(crypto_blake3_ctx *ctx,
+                                u8 *out, size_t out_len)
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(out, out_len);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_blake3_final(ctx, out, out_len);
+	return CRYPTO_OK;
 }
 
 void crypto_blake3(u8 *out, size_t out_len,
@@ -6305,6 +6586,20 @@ void crypto_x25519_inverse(u8 blind_salt [32], const u8 private_key[32],
 	WIPE_BUFFER(product);  WIPE_BUFFER(m_inv);
 }
 
+int crypto_x25519_inverse_checked(u8 blind_salt[32],
+                                  const u8 private_key[32],
+                                  const u8 curve_point[32])
+{
+	int err = check_out_ptr(blind_salt);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(private_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(curve_point, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_x25519_inverse(blind_salt, private_key, curve_point);
+	return CRYPTO_OK;
+}
+
 ////////////////////////////////
 /// Authenticated encryption ///
 ////////////////////////////////
@@ -6347,6 +6642,45 @@ void crypto_aead_init_ietf(crypto_aead_ctx *ctx,
 	COPY(ctx->key  , key      , 32);
 	COPY(ctx->nonce, nonce + 4,  8);
 	ctx->counter = (u64)load32_le(nonce) << 32;
+}
+
+int crypto_aead_init_x_checked(crypto_aead_ctx *ctx,
+                               const u8 key[32], const u8 nonce[24])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 24);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_aead_init_x(ctx, key, nonce);
+	return CRYPTO_OK;
+}
+
+int crypto_aead_init_djb_checked(crypto_aead_ctx *ctx,
+                                 const u8 key[32], const u8 nonce[8])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 8);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_aead_init_djb(ctx, key, nonce);
+	return CRYPTO_OK;
+}
+
+int crypto_aead_init_ietf_checked(crypto_aead_ctx *ctx,
+                                  const u8 key[32], const u8 nonce[12])
+{
+	int err = check_out_ptr(ctx);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(nonce, 12);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_aead_init_ietf(ctx, key, nonce);
+	return CRYPTO_OK;
 }
 
 void crypto_aead_write(crypto_aead_ctx *ctx, u8 *cipher_text, u8 mac[16],

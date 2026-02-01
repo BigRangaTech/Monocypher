@@ -81,6 +81,10 @@ void crypto_wipe(void *secret, size_t size);
 
 // OS-backed random bytes (preferred)
 int crypto_random(uint8_t *out, size_t out_size);
+#if defined(MONOCYPHER_RNG_DIAGNOSTICS) && MONOCYPHER_RNG_DIAGNOSTICS
+// Optional RNG diagnostics (platform-specific error code)
+int crypto_random_last_error(void);
+#endif
 
 // Checked API error codes
 // -----------------------
@@ -92,6 +96,10 @@ typedef enum {
 	CRYPTO_ERR_AUTH     = -4,
 	CRYPTO_ERR_CONFIG   = -5,
 } crypto_err;
+
+#if defined(MONOCYPHER_STRERROR) && MONOCYPHER_STRERROR
+const char *crypto_strerror(int err);
+#endif
 
 
 // Authenticated encryption
@@ -129,6 +137,15 @@ void crypto_aead_init_djb(crypto_aead_ctx *ctx,
                           const uint8_t key[32], const uint8_t nonce[8]);
 void crypto_aead_init_ietf(crypto_aead_ctx *ctx,
                            const uint8_t key[32], const uint8_t nonce[12]);
+int crypto_aead_init_x_checked(crypto_aead_ctx *ctx,
+                               const uint8_t key[32],
+                               const uint8_t nonce[24]);
+int crypto_aead_init_djb_checked(crypto_aead_ctx *ctx,
+                                 const uint8_t key[32],
+                                 const uint8_t nonce[8]);
+int crypto_aead_init_ietf_checked(crypto_aead_ctx *ctx,
+                                  const uint8_t key[32],
+                                  const uint8_t nonce[12]);
 
 void crypto_aead_write(crypto_aead_ctx *ctx,
                        uint8_t         *cipher_text,
@@ -218,6 +235,12 @@ void crypto_blake2b_keyed_init(crypto_blake2b_ctx *ctx, size_t hash_size,
 void crypto_blake2b_update(crypto_blake2b_ctx *ctx,
                            const uint8_t *message, size_t message_size);
 void crypto_blake2b_final(crypto_blake2b_ctx *ctx, uint8_t *hash);
+int crypto_blake2b_init_checked(crypto_blake2b_ctx *ctx, size_t hash_size);
+int crypto_blake2b_keyed_init_checked(crypto_blake2b_ctx *ctx, size_t hash_size,
+                                      const uint8_t *key, size_t key_size);
+int crypto_blake2b_update_checked(crypto_blake2b_ctx *ctx,
+                                  const uint8_t *message, size_t message_size);
+int crypto_blake2b_final_checked(crypto_blake2b_ctx *ctx, uint8_t *hash);
 
 
 // SHA-256
@@ -238,6 +261,10 @@ void crypto_sha256_update(crypto_sha256_ctx *ctx,
 void crypto_sha256_final (crypto_sha256_ctx *ctx, uint8_t hash[32]);
 void crypto_sha256(uint8_t hash[32],
                    const uint8_t *message, size_t message_size);
+int crypto_sha256_init_checked(crypto_sha256_ctx *ctx);
+int crypto_sha256_update_checked(crypto_sha256_ctx *ctx,
+                                 const uint8_t *message, size_t message_size);
+int crypto_sha256_final_checked(crypto_sha256_ctx *ctx, uint8_t hash[32]);
 
 typedef struct {
 	uint8_t key[64];
@@ -252,6 +279,13 @@ void crypto_sha256_hmac_final (crypto_sha256_hmac_ctx *ctx, uint8_t hmac[32]);
 void crypto_sha256_hmac(uint8_t hmac[32],
                         const uint8_t *key, size_t key_size,
                         const uint8_t *message, size_t message_size);
+int crypto_sha256_hmac_init_checked(crypto_sha256_hmac_ctx *ctx,
+                                    const uint8_t *key, size_t key_size);
+int crypto_sha256_hmac_update_checked(crypto_sha256_hmac_ctx *ctx,
+                                      const uint8_t *message,
+                                      size_t message_size);
+int crypto_sha256_hmac_final_checked(crypto_sha256_hmac_ctx *ctx,
+                                     uint8_t hmac[32]);
 
 // SHA-256 HKDF
 void crypto_sha256_hkdf_expand(uint8_t       *okm,  size_t okm_size,
@@ -261,6 +295,9 @@ void crypto_sha256_hkdf(uint8_t       *okm, size_t okm_size,
                         const uint8_t *ikm, size_t ikm_size,
                         const uint8_t *salt, size_t salt_size,
                         const uint8_t *info, size_t info_size);
+int crypto_sha256_hkdf_expand_checked(uint8_t       *okm, size_t okm_size,
+                                      const uint8_t *prk, size_t prk_size,
+                                      const uint8_t *info, size_t info_size);
 
 // Checked SHA-256 interface
 int crypto_sha256_checked(uint8_t hash[32],
@@ -318,6 +355,19 @@ void crypto_blake3_keyed(uint8_t *out, size_t out_size,
 void crypto_blake3_derive_key(uint8_t *out, size_t out_size,
                               const uint8_t *context, size_t context_size,
                               const uint8_t *message, size_t message_size);
+int crypto_blake3_init_checked(crypto_blake3_ctx *ctx);
+int crypto_blake3_keyed_init_checked(crypto_blake3_ctx *ctx,
+                                     const uint8_t key[CRYPTO_BLAKE3_KEY_LEN]);
+int crypto_blake3_derive_key_init_checked(crypto_blake3_ctx *ctx,
+                                          const uint8_t *context,
+                                          size_t context_size);
+int crypto_blake3_update_checked(crypto_blake3_ctx *ctx,
+                                 const uint8_t *input, size_t input_size);
+int crypto_blake3_final_seek_checked(const crypto_blake3_ctx *ctx,
+                                     uint64_t seek,
+                                     uint8_t *out, size_t out_size);
+int crypto_blake3_final_checked(crypto_blake3_ctx *ctx,
+                                uint8_t *out, size_t out_size);
 
 // Checked BLAKE3 interface
 int crypto_blake3_checked(uint8_t *out, size_t out_size,
@@ -400,6 +450,9 @@ int crypto_x25519_to_eddsa_checked(uint8_t eddsa[32], const uint8_t x25519[32]);
 void crypto_x25519_inverse(uint8_t       blind_salt [32],
                            const uint8_t private_key[32],
                            const uint8_t curve_point[32]);
+int crypto_x25519_inverse_checked(uint8_t       blind_salt[32],
+                                  const uint8_t private_key[32],
+                                  const uint8_t curve_point[32]);
 
 // "Dirty" versions of x25519_public_key().
 // Use with crypto_elligator_rev().
@@ -468,6 +521,9 @@ int crypto_eddsa_check_equation_checked(const uint8_t signature[64],
 void crypto_chacha20_h(uint8_t       out[32],
                        const uint8_t key[32],
                        const uint8_t in [16]);
+int crypto_chacha20_h_checked(uint8_t out[32],
+                              const uint8_t key[32],
+                              const uint8_t in[16]);
 
 // Unauthenticated stream cipher.
 // Don't forget to add authentication.
@@ -544,6 +600,12 @@ void crypto_poly1305_init  (crypto_poly1305_ctx *ctx, const uint8_t key[32]);
 void crypto_poly1305_update(crypto_poly1305_ctx *ctx,
                             const uint8_t *message, size_t message_size);
 void crypto_poly1305_final (crypto_poly1305_ctx *ctx, uint8_t mac[16]);
+int crypto_poly1305_init_checked(crypto_poly1305_ctx *ctx,
+                                 const uint8_t key[32]);
+int crypto_poly1305_update_checked(crypto_poly1305_ctx *ctx,
+                                   const uint8_t *message,
+                                   size_t message_size);
+int crypto_poly1305_final_checked(crypto_poly1305_ctx *ctx, uint8_t mac[16]);
 
 
 // Elligator 2

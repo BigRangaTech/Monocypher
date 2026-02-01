@@ -15,6 +15,7 @@ Unreleased
 - Expanded fuzzing harnesses to cover safe AEAD, hashes, Poly1305, and Elligator.
 - Added fuzz seed corpus generator and Makefile fuzz targets.
 - Added TOOLING.md to track tests, coverage, and fuzzing workflows.
+- Added ERROR_HANDLING.md to track the error handling roadmap.
 - Documented crypto_random and tooling updates in README/manual.
 - Documented hardened build profile in TOOLING.md.
 - crypto_random now prefers getrandom/arc4random_buf with /dev/urandom fallback.
@@ -30,6 +31,13 @@ Unreleased
 - Added safe AEAD helpers that zero plaintext on authentication failure.
 - Added optional pthread-based parallel ChaCha20 (CHACHA20_THREADS=1).
 - Added AVX2 8-way ChaCha20 path with runtime dispatch.
+- Added checked wrappers for incremental hash/AEAD APIs and X25519 inverse.
+- Added optional crypto_strerror helper (STRERROR=1 / MONOCYPHER_STRERROR=1).
+- Added optional RNG diagnostics helper (RNG_DIAGNOSTICS=1 /
+  MONOCYPHER_RNG_DIAGNOSTICS=1) with crypto_random_last_error().
+- Added SHA-256 and BLAKE3 manpages and updated docs to prefer checked APIs.
+- Added checked wrappers for optional SHA-512 incremental/HMAC/HKDF expand and
+  Ed25519 APIs.
 
 
 4.0.2

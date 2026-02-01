@@ -8,9 +8,7 @@
 .\"
 .\" ----------------------------------------------------------------------------
 .\"
-.\" Copyright (c) 2017-2019 Loup Vaillant
-.\" Copyright (c) 2017-2018 Michael Savage
-.\" Copyright (c) 2017, 2019 Fabio Scotoni
+.\" Copyright (c) 2026
 .\" All rights reserved.
 .\"
 .\"
@@ -40,7 +38,7 @@
 .\"
 .\" ----------------------------------------------------------------------------
 .\"
-.\" Written in 2017-2019 by Loup Vaillant, Michael Savage and Fabio Scotoni
+.\" Written in 2026.
 .\"
 .\" To the extent possible under law, the author(s) have dedicated all copyright
 .\" and related neighboring rights to this software to the public domain
@@ -50,68 +48,36 @@
 .\" with this software.  If not, see
 .\" <https://creativecommons.org/publicdomain/zero/1.0/>
 .\"
-.Dd December 12, 2019
-.Dt CRYPTO_WIPE 3MONOCYPHER
+.Dd February 1, 2026
+.Dt CRYPTO_STRERROR 3MONOCYPHER
 .Os
 .Sh NAME
-.Nm crypto_wipe
-.Nd wipe data from memory
+.Nm crypto_strerror
+.Nd error string for checked APIs
 .Sh SYNOPSIS
 .In monocypher.h
-.Ft void
-.Fo crypto_wipe
-.Fa "void *secret"
-.Fa "size_t secret_size"
+.Ft const char *
+.Fo crypto_strerror
+.Fa "int err"
 .Fc
 .Sh DESCRIPTION
-.Fn crypto_wipe
-securely erases sensitive data in memory.
+.Fn crypto_strerror
+maps
+.Vt crypto_err
+values to constant strings such as
+.Dq CRYPTO_OK
+or
+.Dq CRYPTO_ERR_NULL .
 .Pp
-Sensitive data (such as cryptographic keys or secret plaintexts) should
-be erased from memory as early as possible to minimise the window in
-which it can be leaked.
-Standard functions like memset and bzero are not safe to use as the
-compiler may decide they have no effect and optimise them out.
-.Pp
-The arguments are:
-.Bl -tag -width Ds
-.It Fa secret
-The buffer to erase.
-.It Fa secret_size
-The number of bytes to erase from the buffer.
-This is normally the size of the entire buffer.
-.El
-.Pp
-Monocypher will wipe its context structs when finalizing an operation
-such as signing or decrypting.
-When using direct interfaces like
-.Xr crypto_aead_lock 3monocypher ,
-these context structs are invisible to you.
-However, they are exposed in incremental interfaces like
-.Xr crypto_blake2b_init 3monocypher .
-The original key buffer does not get automatically wiped.
-When using incremental interfaces, you may want to wipe the original key
-buffers immediately after calling the respective init function.
-.Pp
-Using
-.Fn crypto_wipe
-alone may not be enough for security.
-It is recommended to lock down relevant memory regions as well.
-Refer to
-.Xr intro 3monocypher
-for instructions on how to lock down memory on common operating systems.
+This helper is optional and only available when Monocypher is built with
+.Dv MONOCYPHER_STRERROR=1
+(or
+.Dv STRERROR=1
+when using the provided makefile).
 .Sh RETURN VALUES
-This function returns nothing.
+On success, a pointer to a constant string is returned.
+Unknown error codes return
+.Dq CRYPTO_ERR_UNKNOWN .
 .Sh SEE ALSO
+.Xr crypto_random 3monocypher ,
 .Xr intro 3monocypher
-.Sh HISTORY
-The
-.Fn crypto_wipe
-function first appeared in Monocypher 1.1.0.
-.Sh CAVEATS
-.Fn crypto_wipe
-does nothing when given a
-.Dv NULL
-pointer or a size of zero.
-Most other unchecked APIs do not perform input validation; for safer
-application code, use checked variants where available.

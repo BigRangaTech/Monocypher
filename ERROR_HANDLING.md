@@ -11,7 +11,13 @@ Current state
   `CRYPTO_ERR_NULL`, `CRYPTO_ERR_SIZE`, `CRYPTO_ERR_OVERFLOW`,
   `CRYPTO_ERR_AUTH`, `CRYPTO_ERR_CONFIG`.
 - Checked wrappers validate pointers/sizes and return `crypto_err`.
+- Checked wrappers cover core APIs and optional SHA-512/Ed25519 APIs,
+  including incremental interfaces.
 - `crypto_random` returns `crypto_err` on failure.
+- Optional `crypto_strerror(int)` helper is available when compiled with
+  `MONOCYPHER_STRERROR=1`.
+- Optional RNG diagnostics (`MONOCYPHER_RNG_DIAGNOSTICS=1`) expose
+  `crypto_random_last_error()` for platform-specific error detail.
 
 Plan
 ----
@@ -21,17 +27,16 @@ Plan
    - Ensure auth failures consistently map to `CRYPTO_ERR_AUTH`.
 
 2) **Error-string helper (optional)**
-   - Add a tiny `crypto_strerror(int)` helper behind a build flag
-     (e.g., `MONOCYPHER_STRERROR=1`) to avoid binary bloat for embedded users.
-   - Keep strings stable and documented.
+   - Implemented behind `MONOCYPHER_STRERROR=1`; keep strings stable and
+     documented.
 
 3) **Documentation alignment**
    - Update manpages and examples to prefer checked APIs for application code.
    - Document the error mapping for each checked wrapper in the API docs.
 
 4) **RNG failure detail (optional)**
-   - Consider a compile-time switch to expose more RNG error detail for
-     debugging without changing the default API surface.
+   - Implemented: `MONOCYPHER_RNG_DIAGNOSTICS=1` adds
+     `crypto_random_last_error()` for debugging.
 
 Policy
 ------
