@@ -69,6 +69,7 @@ Fork docs:
 
 - `TOOLING.md` for tests, coverage, fuzzing, and toolchain setup.
 - `ERROR_HANDLING.md` for the checked-API/error handling roadmap.
+- `ROADMAP.md` for broader forward-looking work.
 
 
 Installation
