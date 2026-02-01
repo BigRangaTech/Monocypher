@@ -68,6 +68,16 @@ SIZE         ?= 0
 ARGON2_THREADS ?= 0
 BLAKE3_THREADS ?= 0
 CHACHA20_THREADS ?= 0
+FUZZ_CC ?= clang
+FUZZ_CFLAGS ?= -std=c99 -g -O1 -fsanitize=fuzzer,address,undefined
+FUZZ_LDFLAGS ?=
+FUZZ_BIN_DIR ?= tests/fuzz/bin
+FUZZ_CORPUS_DIR ?= tests/fuzz/corpus
+FUZZ_RUNS ?= 1000
+FUZZ_I = -I src -I src/optional
+FUZZERS = fuzz_aead fuzz_aead_safe fuzz_x25519 fuzz_eddsa fuzz_argon2 \
+          fuzz_hashes fuzz_poly1305 fuzz_elligator
+FUZZ_TARGETS = $(addprefix $(FUZZ_BIN_DIR)/,$(FUZZERS))
 
 ifeq ($(PORTABLE),0)
 CFLAGS       += -march=native
@@ -105,6 +115,7 @@ endif
 .PHONY: all library static-library dynamic-library  \
         install install-lib install-pc install-doc  \
         check test tis-ci ctgrind harden sanitize size \
+        fuzz fuzz-run fuzz-corpus \
         clean uninstall dist
 
 ##################
@@ -131,9 +142,25 @@ sanitize:
 size:
 	$(MAKE) SIZE=1
 
+fuzz: $(FUZZ_TARGETS)
+
+fuzz-corpus:
+	tests/fuzz/gen_corpus.sh $(FUZZ_CORPUS_DIR)
+
+fuzz-run: fuzz fuzz-corpus
+	@for f in $(FUZZ_TARGETS); do \
+		corpus="$(FUZZ_CORPUS_DIR)/$$(basename $$f)"; \
+		if [ -d "$$corpus" ]; then \
+			$$f -runs=$(FUZZ_RUNS) "$$corpus"; \
+		else \
+			$$f -runs=$(FUZZ_RUNS); \
+		fi; \
+	done
+
 clean:
 	rm -rf lib/ doc/html/ doc/man3/
 	rm -f *.out
+	rm -rf tests/fuzz/bin
 
 #############
 ## Install ##
@@ -213,6 +240,14 @@ lib/tis-ci.o: tests/tis-ci.c $(TEST_COMMON) tests/tis-ci-vectors.h
 lib/ctgrind.o: tests/ctgrind.c $(TEST_COMMON)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(TEST_I) -fPIC -c -o $@ tests/ctgrind.c
+
+######################
+## Fuzzing targets  ##
+######################
+$(FUZZ_BIN_DIR)/fuzz_%: tests/fuzz/fuzz_%.c src/monocypher.c src/monocypher.h
+	@mkdir -p $(FUZZ_BIN_DIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $(FUZZ_I) $< src/monocypher.c \
+		-o $@ $(FUZZ_LDFLAGS)
 
 ######################
 ## Test executables ##

@@ -127,6 +127,159 @@ static void test_checked(void)
 	                                  0, 0, 0, 0, 0, 0) == CRYPTO_ERR_SIZE);
 	ASSERT(crypto_chacha20_djb_checked(0, 0, 1, hash32, hash32, 0, 0)
 	       == CRYPTO_ERR_NULL);
+
+	u8 a16[16] = {0};
+	u8 b16[16] = {0};
+	u8 a32[32] = {0};
+	u8 b32[32] = {0};
+	u8 a64[64] = {0};
+	u8 b64[64] = {0};
+
+	ASSERT(crypto_verify16_checked(a16, b16) == CRYPTO_OK);
+	b16[0] = 1;
+	ASSERT(crypto_verify16_checked(a16, b16) == CRYPTO_ERR_AUTH);
+	ASSERT(crypto_verify16_checked(0, b16) == CRYPTO_ERR_NULL);
+
+	ASSERT(crypto_verify32_checked(a32, b32) == CRYPTO_OK);
+	b32[0] = 1;
+	ASSERT(crypto_verify32_checked(a32, b32) == CRYPTO_ERR_AUTH);
+
+	ASSERT(crypto_verify64_checked(a64, b64) == CRYPTO_OK);
+	b64[0] = 1;
+	ASSERT(crypto_verify64_checked(a64, b64) == CRYPTO_ERR_AUTH);
+
+	RANDOM_INPUT(poly_key, 32);
+	RANDOM_INPUT(poly_msg, 17);
+	u8 poly_mac_ref[16];
+	u8 poly_mac_chk[16];
+	crypto_poly1305(poly_mac_ref, poly_msg, sizeof(poly_msg), poly_key);
+	ASSERT(crypto_poly1305_checked(poly_mac_chk, poly_msg,
+	                               sizeof(poly_msg), poly_key) == CRYPTO_OK);
+	ASSERT_EQUAL(poly_mac_ref, poly_mac_chk, 16);
+	ASSERT(crypto_poly1305_checked(0, poly_msg, sizeof(poly_msg), poly_key)
+	       == CRYPTO_ERR_NULL);
+
+	RANDOM_INPUT(seed, 32);
+	u8 sk[64];
+	u8 pk[32];
+	ASSERT(crypto_eddsa_key_pair_checked(sk, pk, seed) == CRYPTO_OK);
+	ASSERT_EQUAL(sk + 32, pk, 32);
+
+	RANDOM_INPUT(message, 32);
+	u8 signature[64];
+	ASSERT(crypto_eddsa_sign_checked(signature, sk,
+	                                 message, sizeof(message)) == CRYPTO_OK);
+	ASSERT(crypto_eddsa_sign_checked(0, sk,
+	                                 message, sizeof(message))
+	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_eddsa_check_checked(signature, pk,
+	                                  message, sizeof(message))
+	       == CRYPTO_OK);
+	u8 signature_bad[64];
+	memcpy(signature_bad, signature, sizeof(signature));
+	signature_bad[0] ^= 1;
+	ASSERT(crypto_eddsa_check_checked(signature_bad, pk,
+	                                  message, sizeof(message))
+	       == CRYPTO_ERR_AUTH);
+
+	crypto_blake2b_ctx ctx;
+	u8 eddsa_hash[64];
+	u8 h[32];
+	crypto_blake2b_init(&ctx, 64);
+	crypto_blake2b_update(&ctx, signature, 32);
+	crypto_blake2b_update(&ctx, pk, 32);
+	crypto_blake2b_update(&ctx, message, sizeof(message));
+	crypto_blake2b_final(&ctx, eddsa_hash);
+	crypto_eddsa_reduce(h, eddsa_hash);
+	ASSERT(crypto_eddsa_check_equation_checked(signature, pk, h)
+	       == CRYPTO_OK);
+	ASSERT(crypto_eddsa_check_equation_checked(signature_bad, pk, h)
+	       == CRYPTO_ERR_AUTH);
+
+	RANDOM_INPUT(trim_in, 32);
+	u8 trim_ref[32];
+	u8 trim_chk[32];
+	crypto_eddsa_trim_scalar(trim_ref, trim_in);
+	ASSERT(crypto_eddsa_trim_scalar_checked(trim_chk, trim_in) == CRYPTO_OK);
+	ASSERT_EQUAL(trim_ref, trim_chk, 32);
+
+	RANDOM_INPUT(reduce_in, 64);
+	u8 reduce_ref[32];
+	u8 reduce_chk[32];
+	crypto_eddsa_reduce(reduce_ref, reduce_in);
+	ASSERT(crypto_eddsa_reduce_checked(reduce_chk, reduce_in) == CRYPTO_OK);
+	ASSERT_EQUAL(reduce_ref, reduce_chk, 32);
+
+	RANDOM_INPUT(mul_a, 32);
+	RANDOM_INPUT(mul_b, 32);
+	RANDOM_INPUT(mul_c, 32);
+	u8 mul_ref[32];
+	u8 mul_chk[32];
+	crypto_eddsa_mul_add(mul_ref, mul_a, mul_b, mul_c);
+	ASSERT(crypto_eddsa_mul_add_checked(mul_chk, mul_a, mul_b, mul_c)
+	       == CRYPTO_OK);
+	ASSERT_EQUAL(mul_ref, mul_chk, 32);
+
+	RANDOM_INPUT(scalar_in, 32);
+	u8 point_ref[32];
+	u8 point_chk[32];
+	crypto_eddsa_scalarbase(point_ref, scalar_in);
+	ASSERT(crypto_eddsa_scalarbase_checked(point_chk, scalar_in) == CRYPTO_OK);
+	ASSERT_EQUAL(point_ref, point_chk, 32);
+
+	RANDOM_INPUT(x25519_in, 32);
+	u8 eddsa_ref[32];
+	u8 eddsa_chk[32];
+	crypto_x25519_to_eddsa(eddsa_ref, x25519_in);
+	ASSERT(crypto_x25519_to_eddsa_checked(eddsa_chk, x25519_in)
+	       == CRYPTO_OK);
+	ASSERT_EQUAL(eddsa_ref, eddsa_chk, 32);
+
+	RANDOM_INPUT(eddsa_in, 32);
+	u8 x25519_ref[32];
+	u8 x25519_chk[32];
+	crypto_eddsa_to_x25519(x25519_ref, eddsa_in);
+	ASSERT(crypto_eddsa_to_x25519_checked(x25519_chk, eddsa_in)
+	       == CRYPTO_OK);
+	ASSERT_EQUAL(x25519_ref, x25519_chk, 32);
+
+	RANDOM_INPUT(sk_dirty, 32);
+	u8 pk_small_ref[32];
+	u8 pk_small_chk[32];
+	u8 pk_fast_ref[32];
+	u8 pk_fast_chk[32];
+	crypto_x25519_dirty_small(pk_small_ref, sk_dirty);
+	ASSERT(crypto_x25519_dirty_small_checked(pk_small_chk, sk_dirty)
+	       == CRYPTO_OK);
+	ASSERT_EQUAL(pk_small_ref, pk_small_chk, 32);
+	crypto_x25519_dirty_fast(pk_fast_ref, sk_dirty);
+	ASSERT(crypto_x25519_dirty_fast_checked(pk_fast_chk, sk_dirty)
+	       == CRYPTO_OK);
+	ASSERT_EQUAL(pk_fast_ref, pk_fast_chk, 32);
+
+	RANDOM_INPUT(hidden, 32);
+	u8 curve_ref[32];
+	u8 curve_chk[32];
+	crypto_elligator_map(curve_ref, hidden);
+	ASSERT(crypto_elligator_map_checked(curve_chk, hidden) == CRYPTO_OK);
+	ASSERT_EQUAL(curve_ref, curve_chk, 32);
+
+	u8 hidden_rev[32];
+	ASSERT(crypto_elligator_rev_checked(hidden_rev, curve_ref, hidden[31])
+	       == CRYPTO_OK);
+	u8 curve_roundtrip[32];
+	crypto_elligator_map(curve_roundtrip, hidden_rev);
+	ASSERT_EQUAL(curve_ref, curve_roundtrip, 32);
+
+	RANDOM_INPUT(seed2, 32);
+	u8 hidden_kp[32];
+	u8 sk_kp[32];
+	u8 pk_kp[32];
+	ASSERT(crypto_elligator_key_pair_checked(hidden_kp, sk_kp, seed2)
+	       == CRYPTO_OK);
+	crypto_x25519_dirty_fast(pk_kp, sk_kp);
+	ASSERT(crypto_elligator_rev_checked(hidden_rev, pk_kp, hidden_kp[31])
+	       == CRYPTO_OK);
 }
 
 static u8 hex_nibble(char c)
@@ -392,6 +545,35 @@ static void test_aead(void)
 		ASSERT_EQUAL(plaintext, out, 8);
 		box[0]++;
 		ASSERT_KO(crypto_aead_unlock(out, box, key, nonce, ad, 4, box+16, 8));
+	}
+
+	printf("\taead safe (zero on fail)\n");
+	{
+		u8 zero8[8] = {0};
+		RANDOM_INPUT(key      , 32);
+		RANDOM_INPUT(nonce    , 24);
+		RANDOM_INPUT(ad       ,  4);
+		RANDOM_INPUT(plaintext,  8);
+		u8 box[24];
+		u8 out[8];
+		crypto_aead_lock(box+16, box, key, nonce, ad, 4, plaintext, 8);
+		box[0]++;
+		memset(out, 0xaa, sizeof(out));
+		ASSERT_KO(crypto_aead_unlock_safe(out, box, key, nonce, ad, 4,
+		                                 box+16, 8));
+		ASSERT_EQUAL(out, zero8, sizeof(out));
+
+		crypto_aead_ctx ctx_w;
+		crypto_aead_ctx ctx_r;
+		u8 mac[16];
+		u8 ct[8];
+		crypto_aead_init_ietf(&ctx_w, key, nonce);
+		crypto_aead_init_ietf(&ctx_r, key, nonce);
+		crypto_aead_write(&ctx_w, ct, mac, ad, 4, plaintext, 8);
+		mac[0] ^= 1;
+		memset(out, 0xbb, sizeof(out));
+		ASSERT_KO(crypto_aead_read_safe(&ctx_r, out, mac, ad, 4, ct, 8));
+		ASSERT_EQUAL(out, zero8, sizeof(out));
 	}
 
 	printf("\taead incr (roundtrip)\n");

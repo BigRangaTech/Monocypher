@@ -6,11 +6,14 @@ Unreleased
 - Added BLAKE3 (hash, keyed hash, derive-key mode) to core.
 - Relicensed fork under GPL-2.0-or-later (see LICENSE and NOTICE.md).
 - Added checked API wrappers with clearer error codes for size/pointer validation.
+- Expanded checked API coverage (verify, Poly1305, EdDSA, Elligator, X25519 conversions).
 - Added build profiles: PORTABLE (default), HARDEN, and SANITIZE.
 - Added SIZE build profile (uses -Os and -DBLAKE2_NO_UNROLLING).
 - Strengthened crypto_wipe with platform secure zeroization when available.
 - Added crypto_random OS-backed RNG helper.
 - Added libFuzzer and AFL harnesses for AEAD, X25519, EdDSA, and Argon2.
+- Expanded fuzzing harnesses to cover safe AEAD, hashes, Poly1305, and Elligator.
+- Added fuzz seed corpus generator and Makefile fuzz targets.
 - Added SIMD-accelerated ChaCha20 (SSE2/NEON) with runtime detection.
 - Added SIMD Poly1305 multiplication (AVX2/SSE2/NEON) and SIMD X25519
   field ops (AVX2/SSE2/NEON), with runtime dispatch.

@@ -296,6 +296,32 @@ static u64 x64(const u8 a[64],const u8 b[64]){return x32(a,b)| x32(a+32, b+32);}
 int crypto_verify16(const u8 a[16], const u8 b[16]){ return neq0(x16(a, b)); }
 int crypto_verify32(const u8 a[32], const u8 b[32]){ return neq0(x32(a, b)); }
 int crypto_verify64(const u8 a[64], const u8 b[64]){ return neq0(x64(a, b)); }
+int crypto_verify16_checked(const u8 a[16], const u8 b[16])
+{
+	int err = check_ptr(a, 16);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(b, 16);
+	if (err != CRYPTO_OK) { return err; }
+	return crypto_verify16(a, b) ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
+
+int crypto_verify32_checked(const u8 a[32], const u8 b[32])
+{
+	int err = check_ptr(a, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(b, 32);
+	if (err != CRYPTO_OK) { return err; }
+	return crypto_verify32(a, b) ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
+
+int crypto_verify64_checked(const u8 a[64], const u8 b[64])
+{
+	int err = check_ptr(a, 64);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(b, 64);
+	if (err != CRYPTO_OK) { return err; }
+	return crypto_verify64(a, b) ? CRYPTO_ERR_AUTH : CRYPTO_OK;
+}
 
 void crypto_wipe(void *secret, size_t size)
 {
@@ -1538,6 +1564,19 @@ void crypto_poly1305(u8     mac[16],  const u8 *message,
 	crypto_poly1305_init  (&ctx, key);
 	crypto_poly1305_update(&ctx, message, message_size);
 	crypto_poly1305_final (&ctx, mac);
+}
+
+int crypto_poly1305_checked(u8 mac[16], const u8 *message,
+                            size_t message_size, const u8 key[32])
+{
+	int err = check_out_ptr(mac);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_poly1305(mac, message, message_size, key);
+	return CRYPTO_OK;
 }
 
 ////////////////
@@ -4641,6 +4680,16 @@ void crypto_eddsa_trim_scalar(u8 out[32], const u8 in[32])
 	out[31] |= 64;
 }
 
+int crypto_eddsa_trim_scalar_checked(u8 out[32], const u8 in[32])
+{
+	int err = check_out_ptr(out);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(in, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_trim_scalar(out, in);
+	return CRYPTO_OK;
+}
+
 // get bit from scalar at position i
 static int scalar_bit(const u8 s[32], int i)
 {
@@ -4856,6 +4905,16 @@ void crypto_eddsa_reduce(u8 reduced[32], const u8 expanded[64])
 	WIPE_BUFFER(x);
 }
 
+int crypto_eddsa_reduce_checked(u8 reduced[32], const u8 expanded[64])
+{
+	int err = check_out_ptr(reduced);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(expanded, 64);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_reduce(reduced, expanded);
+	return CRYPTO_OK;
+}
+
 // r = (a * b) + c
 void crypto_eddsa_mul_add(u8 r[32],
                           const u8 a[32], const u8 b[32], const u8 c[32])
@@ -4868,6 +4927,22 @@ void crypto_eddsa_mul_add(u8 r[32],
 	WIPE_BUFFER(p);
 	WIPE_BUFFER(A);
 	WIPE_BUFFER(B);
+}
+
+int crypto_eddsa_mul_add_checked(u8 r[32],
+                                 const u8 a[32], const u8 b[32],
+                                 const u8 c[32])
+{
+	int err = check_out_ptr(r);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(a, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(b, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(c, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_mul_add(r, a, b, c);
+	return CRYPTO_OK;
 }
 
 ///////////////
@@ -5225,6 +5300,21 @@ int crypto_eddsa_check_equation(const u8 signature[64], const u8 public_key[32],
 	return crypto_verify32(check, zero_point);
 }
 
+int crypto_eddsa_check_equation_checked(const u8 signature[64],
+                                        const u8 public_key[32],
+                                        const u8 h[32])
+{
+	int err = check_ptr(signature, 64);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(public_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(h, 32);
+	if (err != CRYPTO_OK) { return err; }
+	return crypto_eddsa_check_equation(signature, public_key, h)
+		? CRYPTO_ERR_AUTH
+		: CRYPTO_OK;
+}
+
 // 5-bit signed comb in cached format (Niels coordinates, Z=1)
 static const ge_precomp b_comb_low[8] = {
 	{{-6816601,-2324159,-22559413,124364,18015490,
@@ -5406,6 +5496,16 @@ void crypto_eddsa_scalarbase(u8 point[32], const u8 scalar[32])
 	WIPE_CTX(&P);
 }
 
+int crypto_eddsa_scalarbase_checked(u8 point[32], const u8 scalar[32])
+{
+	int err = check_out_ptr(point);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(scalar, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_scalarbase(point, scalar);
+	return CRYPTO_OK;
+}
+
 void crypto_eddsa_key_pair(u8 secret_key[64], u8 public_key[32], u8 seed[32])
 {
 	// To allow overlaps, observable writes happen in this order:
@@ -5421,6 +5521,20 @@ void crypto_eddsa_key_pair(u8 secret_key[64], u8 public_key[32], u8 seed[32])
 	crypto_eddsa_scalarbase(secret_key + 32, a);
 	COPY(public_key, secret_key + 32, 32);
 	WIPE_BUFFER(a);
+}
+
+int crypto_eddsa_key_pair_checked(u8 secret_key[64],
+                                  u8 public_key[32],
+                                  u8 seed[32])
+{
+	int err = check_out_ptr(secret_key);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(public_key);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(seed, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_key_pair(secret_key, public_key, seed);
+	return CRYPTO_OK;
 }
 
 static void hash_reduce(u8 h[32],
@@ -5513,6 +5627,19 @@ void crypto_eddsa_sign(u8 signature [64], const u8 secret_key[64],
 	WIPE_BUFFER(r);
 }
 
+int crypto_eddsa_sign_checked(u8 signature[64], const u8 secret_key[64],
+                              const u8 *message, size_t message_size)
+{
+	int err = check_out_ptr(signature);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(secret_key, 64);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_sign(signature, secret_key, message, message_size);
+	return CRYPTO_OK;
+}
+
 // To check the signature R, S of the message M with the public key A,
 // there are 3 steps:
 //
@@ -5527,6 +5654,21 @@ int crypto_eddsa_check(const u8  signature[64], const u8 public_key[32],
 	u8 h[32];
 	hash_reduce(h, signature, 32, public_key, 32, message, message_size);
 	return crypto_eddsa_check_equation(signature, public_key, h);
+}
+
+int crypto_eddsa_check_checked(const u8 signature[64],
+                               const u8 public_key[32],
+                               const u8 *message, size_t message_size)
+{
+	int err = check_ptr(signature, 64);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(public_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(message, message_size);
+	if (err != CRYPTO_OK) { return err; }
+	return crypto_eddsa_check(signature, public_key, message, message_size)
+		? CRYPTO_ERR_AUTH
+		: CRYPTO_OK;
 }
 
 /////////////////////////
@@ -5547,6 +5689,16 @@ void crypto_eddsa_to_x25519(u8 x25519[32], const u8 eddsa[32])
 	WIPE_BUFFER(t2);
 }
 
+int crypto_eddsa_to_x25519_checked(u8 x25519[32], const u8 eddsa[32])
+{
+	int err = check_out_ptr(x25519);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(eddsa, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_eddsa_to_x25519(x25519, eddsa);
+	return CRYPTO_OK;
+}
+
 void crypto_x25519_to_eddsa(u8 eddsa[32], const u8 x25519[32])
 {
 	// (x, y) = (sqrt(-486664)*u/v, (u-1)/(u+1))
@@ -5560,6 +5712,16 @@ void crypto_x25519_to_eddsa(u8 eddsa[32], const u8 x25519[32])
 	fe_tobytes(eddsa, t1);
 	WIPE_BUFFER(t1);
 	WIPE_BUFFER(t2);
+}
+
+int crypto_x25519_to_eddsa_checked(u8 eddsa[32], const u8 x25519[32])
+{
+	int err = check_out_ptr(eddsa);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(x25519, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_x25519_to_eddsa(eddsa, x25519);
+	return CRYPTO_OK;
 }
 
 /////////////////////////////////////////////
@@ -5750,6 +5912,26 @@ void crypto_x25519_dirty_fast(u8 public_key[32], const u8 secret_key[32])
 	WIPE_BUFFER(scalar);
 }
 
+int crypto_x25519_dirty_small_checked(u8 pk[32], const u8 sk[32])
+{
+	int err = check_out_ptr(pk);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(sk, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_x25519_dirty_small(pk, sk);
+	return CRYPTO_OK;
+}
+
+int crypto_x25519_dirty_fast_checked(u8 pk[32], const u8 sk[32])
+{
+	int err = check_out_ptr(pk);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(sk, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_x25519_dirty_fast(pk, sk);
+	return CRYPTO_OK;
+}
+
 ///////////////////
 /// Elligator 2 ///
 ///////////////////
@@ -5842,6 +6024,16 @@ void crypto_elligator_map(u8 curve[32], const u8 hidden[32])
 	WIPE_BUFFER(t3);
 }
 
+int crypto_elligator_map_checked(u8 curve[32], const u8 hidden[32])
+{
+	int err = check_out_ptr(curve);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(hidden, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_elligator_map(curve, hidden);
+	return CRYPTO_OK;
+}
+
 // Elligator inverse map
 //
 // Computes the representative of a point, if possible.  If not, it does
@@ -5904,6 +6096,18 @@ int crypto_elligator_rev(u8 hidden[32], const u8 public_key[32], u8 tweak)
 	return is_square - 1;
 }
 
+int crypto_elligator_rev_checked(u8 hidden[32], const u8 public_key[32],
+                                 u8 tweak)
+{
+	int err = check_out_ptr(hidden);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(public_key, 32);
+	if (err != CRYPTO_OK) { return err; }
+	return crypto_elligator_rev(hidden, public_key, tweak)
+		? CRYPTO_ERR_AUTH
+		: CRYPTO_OK;
+}
+
 void crypto_elligator_key_pair(u8 hidden[32], u8 secret_key[32], u8 seed[32])
 {
 	u8 pk [32]; // public key
@@ -5924,6 +6128,20 @@ void crypto_elligator_key_pair(u8 hidden[32], u8 secret_key[32], u8 seed[32])
 	COPY(secret_key, buf     , 32);
 	WIPE_BUFFER(buf);
 	WIPE_BUFFER(pk);
+}
+
+int crypto_elligator_key_pair_checked(u8 hidden[32],
+                                      u8 secret_key[32],
+                                      u8 seed[32])
+{
+	int err = check_out_ptr(hidden);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_out_ptr(secret_key);
+	if (err != CRYPTO_OK) { return err; }
+	err = check_ptr(seed, 32);
+	if (err != CRYPTO_OK) { return err; }
+	crypto_elligator_key_pair(hidden, secret_key, seed);
+	return CRYPTO_OK;
 }
 
 ///////////////////////
