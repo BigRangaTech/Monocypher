@@ -137,7 +137,11 @@ The same test suite can be run under Clang sanitisers and Valgrind, and
 be checked for code coverage:
 
     $ tests/test.sh
+    $ tests/test-local.sh
     $ tests/coverage.sh
+
+`tests/test-local.sh` uses local clang/valgrind installs. You can
+override paths with `LLVM_DIR` and `VALGRIND_DIR`.
 
 
 ### Serious auditing
@@ -168,6 +172,23 @@ Notes:
 
 [Frama-c]:https://frama-c.com/
 [TIS]: https://trust-in-soft.com/tis-interpreter/
+
+Fuzzing
+-------
+
+LibFuzzer and AFL harnesses live under `tests/fuzz/`.
+
+Make targets:
+
+    $ make fuzz
+    $ make fuzz-corpus
+    $ make fuzz-run FUZZ_RUNS=10000
+
+If clang isn’t on your `PATH`, override the toolchain:
+
+    $ make fuzz FUZZ_CC=/path/to/clang FUZZ_LDFLAGS=-L/path/to/llvm/lib
+
+See `tests/fuzz/README.md` for manual build commands.
 
 
 Customisation
