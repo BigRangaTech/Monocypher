@@ -68,6 +68,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #endif
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #if defined(__GNUC__) || defined(__clang__)
@@ -87,6 +90,14 @@
     defined(__NetBSD__) || defined(__APPLE__)
 extern void explicit_bzero(void *s, size_t n);
 #define HAVE_EXPLICIT_BZERO 1
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__) || defined(__DragonFly__) || defined(__illumos__)
+#define MONOCYPHER_HAS_ARC4RANDOM 1
+#endif
+#if defined(__linux__) && defined(SYS_getrandom)
+#define MONOCYPHER_HAS_GETRANDOM 1
+extern long syscall(long number, ...);
 #endif
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
@@ -338,24 +349,8 @@ void crypto_wipe(void *secret, size_t size)
 #endif
 }
 
-int crypto_random(u8 *out, size_t out_size)
+static int crypto_random_urandom(u8 *out, size_t out_size)
 {
-	if (out_size == 0) {
-		return CRYPTO_OK;
-	}
-	if (out == 0) {
-		return CRYPTO_ERR_NULL;
-	}
-#ifdef _WIN32
-	if (out_size > ULONG_MAX) {
-		return CRYPTO_ERR_SIZE;
-	}
-	if (BCryptGenRandom(NULL, out, (ULONG)out_size,
-	                    BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
-		return CRYPTO_ERR_CONFIG;
-	}
-	return CRYPTO_OK;
-#else
 	int fd = open("/dev/urandom", O_RDONLY);
 	if (fd < 0) {
 		return CRYPTO_ERR_CONFIG;
@@ -380,6 +375,53 @@ int crypto_random(u8 *out, size_t out_size)
 	}
 	close(fd);
 	return CRYPTO_OK;
+}
+
+int crypto_random(u8 *out, size_t out_size)
+{
+	if (out_size == 0) {
+		return CRYPTO_OK;
+	}
+	if (out == 0) {
+		return CRYPTO_ERR_NULL;
+	}
+#ifdef _WIN32
+	if (out_size > ULONG_MAX) {
+		return CRYPTO_ERR_SIZE;
+	}
+	if (BCryptGenRandom(NULL, out, (ULONG)out_size,
+	                    BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+		return CRYPTO_ERR_CONFIG;
+	}
+	return CRYPTO_OK;
+#else
+#if defined(MONOCYPHER_HAS_ARC4RANDOM)
+	arc4random_buf(out, out_size);
+	return CRYPTO_OK;
+#elif defined(MONOCYPHER_HAS_GETRANDOM)
+	size_t remaining = out_size;
+	u8 *p = out;
+	while (remaining > 0) {
+		ssize_t n = (ssize_t)syscall(SYS_getrandom, p, remaining, 0);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == ENOSYS) {
+				return crypto_random_urandom(out, out_size);
+			}
+			return CRYPTO_ERR_CONFIG;
+		}
+		if (n == 0) {
+			return CRYPTO_ERR_CONFIG;
+		}
+		p += (size_t)n;
+		remaining -= (size_t)n;
+	}
+	return CRYPTO_OK;
+#else
+	return crypto_random_urandom(out, out_size);
+#endif
 #endif
 }
 

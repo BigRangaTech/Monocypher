@@ -46,6 +46,7 @@ Features
 - [Public Key Cryptography][PKC] with X25519 key exchanges.
 - [Public Key Signatures][EDDSA] with EdDSA and [Ed25519][].
 - [Steganography and PAKE][STEG] with [Elligator 2][ELLI].
+- OS-backed random bytes helper: `crypto_random`.
 
 [AEAD]:    https://monocypher.org/manual/aead
 [HASH]:    https://monocypher.org/manual/blake2b
@@ -140,8 +141,8 @@ be checked for code coverage:
     $ tests/test-local.sh
     $ tests/coverage.sh
 
-`tests/test-local.sh` uses local clang/valgrind installs. You can
-override paths with `LLVM_DIR` and `VALGRIND_DIR`.
+See `TOOLING.md` for details on tests, coverage, fuzzing, and toolchain
+setup.
 
 
 ### Serious auditing
@@ -176,19 +177,8 @@ Notes:
 Fuzzing
 -------
 
-LibFuzzer and AFL harnesses live under `tests/fuzz/`.
-
-Make targets:
-
-    $ make fuzz
-    $ make fuzz-corpus
-    $ make fuzz-run FUZZ_RUNS=10000
-
-If clang isn’t on your `PATH`, override the toolchain:
-
-    $ make fuzz FUZZ_CC=/path/to/clang FUZZ_LDFLAGS=-L/path/to/llvm/lib
-
-See `tests/fuzz/README.md` for manual build commands.
+LibFuzzer and AFL harnesses live under `tests/fuzz/`. See `TOOLING.md`
+and `tests/fuzz/README.md` for build/run details.
 
 
 Customisation

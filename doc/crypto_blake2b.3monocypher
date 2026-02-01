@@ -352,10 +352,10 @@ with an empty key.
 These functions return nothing.
 .Sh EXAMPLES
 The following examples assume the existence of
-.Fn arc4random_buf ,
+.Fn crypto_random ,
 which fills the given buffer with cryptographically secure random bytes.
 If
-.Fn arc4random_buf
+.Fn crypto_random
 does not exist on your system, see
 .Xr intro 3monocypher
 for advice about how to generate cryptographically secure random bytes.
@@ -372,7 +372,7 @@ Computing a message authentication code all at once:
 uint8_t hash   [16];
 uint8_t key    [32];
 uint8_t message[11] = "Lorem ipsu"; /* Message to authenticate */
-arc4random_buf(key, sizeof(key));
+crypto_random(key, sizeof(key));
 crypto_blake2b_keyed(hash   , sizeof(hash),
                      key    , sizeof(key),
                      message, sizeof(message));
@@ -398,7 +398,7 @@ Computing a message authentication code incrementally:
 uint8_t hash   [ 16];
 uint8_t key    [ 32];
 uint8_t message[500] = {1}; /* Message to authenticate */
-arc4random_buf(key, sizeof(key));
+crypto_random(key, sizeof(key));
 crypto_blake2b_ctx ctx;
 crypto_blake2b_keyed_init(&ctx, sizeof(hash), key,
                           sizeof(key));

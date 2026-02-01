@@ -2,6 +2,9 @@ Fuzzing harnesses
 
 Seed corpus:
   tests/fuzz/gen_corpus.sh tests/fuzz/corpus
+  # Regenerate anytime; the corpus is small and deterministic.
+
+See `TOOLING.md` for the full tooling overview.
 
 LibFuzzer:
   clang -fsanitize=fuzzer,address,undefined -I src -I src/optional \

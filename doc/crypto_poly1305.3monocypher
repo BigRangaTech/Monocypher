@@ -140,10 +140,10 @@ yields the message authentication code.
 These functions return nothing.
 .Sh EXAMPLES
 The following examples assume the existence of
-.Fn arc4random_buf ,
+.Fn crypto_random ,
 which fills the given buffer with cryptographically secure random bytes.
 If
-.Fn arc4random_buf
+.Fn crypto_random
 does not exist on your system, see
 .Xr intro 3monocypher
 for advice about how to generate cryptographically secure random bytes.
@@ -153,7 +153,7 @@ To authenticate a message:
 const uint8_t msg[ 5] = "Lorem"; /* Message to authenticate */
 uint8_t       key[32]; /* Random secret key (use only once) */
 uint8_t       mac[16]; /* Message authentication code (MAC) */
-arc4random_buf(key, 32);
+crypto_random(key, 32);
 crypto_poly1305(mac, msg, 5, key);
 /* Wipe the key */
 crypto_wipe(key, 32);
@@ -183,7 +183,7 @@ const uint8_t msg[500]= {1}; /* Message to authenticate      */
 uint8_t       key[ 32]; /* Random secret key (use only once) */
 uint8_t       mac[ 16]; /* Message authentication code (MAC) */
 crypto_poly1305_ctx ctx;
-arc4random_buf(key, 32);
+crypto_random(key, 32);
 crypto_poly1305_init(&ctx, key);
 /* Wipe the key */
 crypto_wipe(key, 32);

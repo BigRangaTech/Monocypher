@@ -50,7 +50,7 @@
 .\" with this software.  If not, see
 .\" <https://creativecommons.org/publicdomain/zero/1.0/>
 .\"
-.Dd February 20, 2022
+.Dd February 1, 2026
 .Dt INTRO 3MONOCYPHER
 .Os
 .Sh NAME
@@ -161,6 +161,7 @@ and
 .Xr crypto_poly1305_final 3monocypher ,
 .Xr crypto_poly1305_init 3monocypher ,
 .Xr crypto_poly1305_update 3monocypher ,
+.Xr crypto_random 3monocypher ,
 .Xr crypto_verify16 3monocypher ,
 .Xr crypto_verify32 3monocypher ,
 .Xr crypto_verify64 3monocypher ,
@@ -210,6 +211,24 @@ whose misuse has led to countless vulnerabilities in the past.
 For instance, the random stream may be repeated if one is not careful
 with multi-threading, and forward secrecy is lost without proper key
 erasure.
+.Pp
+Monocypher provides
+.Fn crypto_random
+as a convenience wrapper for OS random bytes.
+On Windows it uses
+.Fn BCryptGenRandom ;
+on Unix-like systems it prefers
+.Fn arc4random_buf
+or
+.Fn getrandom ,
+and falls back to
+.Pa /dev/urandom
+if those are unavailable.
+It returns
+.Dv CRYPTO_OK
+or an error code.
+If you need tighter control over error handling or entropy sources, call
+the OS APIs directly.
 .Pp
 Different system calls are available on different systems:
 .Bl -bullet

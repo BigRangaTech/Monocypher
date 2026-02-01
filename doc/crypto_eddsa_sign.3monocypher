@@ -296,10 +296,10 @@ return nothing.
 returns 0 for legitimate signatures and -1 for forgeries.
 .Sh EXAMPLES
 The following examples assume the existence of
-.Fn arc4random_buf ,
+.Fn crypto_random ,
 which fills the given buffer with cryptographically secure random bytes.
 If
-.Fn arc4random_buf
+.Fn crypto_random
 does not exist on your system, see
 .Xr intro 3monocypher
 for advice about how to generate cryptographically secure random bytes.
@@ -309,7 +309,7 @@ Generate a key pair:
 uint8_t seed[32]; /* Random seed         */
 uint8_t sk  [64]; /* secret key          */
 uint8_t pk  [32]; /* Matching public key */
-arc4random_buf(seed, 32);
+crypto_random(seed, 32);
 crypto_eddsa_key_pair(sk, pk, seed);
 /* Wipe the secret key if it is no longer needed */
 /* The seed is wiped automatically               */

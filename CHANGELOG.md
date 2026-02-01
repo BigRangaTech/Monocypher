@@ -14,6 +14,10 @@ Unreleased
 - Added libFuzzer and AFL harnesses for AEAD, X25519, EdDSA, and Argon2.
 - Expanded fuzzing harnesses to cover safe AEAD, hashes, Poly1305, and Elligator.
 - Added fuzz seed corpus generator and Makefile fuzz targets.
+- Added TOOLING.md to track tests, coverage, and fuzzing workflows.
+- Documented crypto_random and tooling updates in README/manual.
+- Documented hardened build profile in TOOLING.md.
+- crypto_random now prefers getrandom/arc4random_buf with /dev/urandom fallback.
 - Added SIMD-accelerated ChaCha20 (SSE2/NEON) with runtime detection.
 - Added SIMD Poly1305 multiplication (AVX2/SSE2/NEON) and SIMD X25519
   field ops (AVX2/SSE2/NEON), with runtime dispatch.

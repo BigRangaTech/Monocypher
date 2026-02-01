@@ -127,6 +127,9 @@ static void test_checked(void)
 	                                  0, 0, 0, 0, 0, 0) == CRYPTO_ERR_SIZE);
 	ASSERT(crypto_chacha20_djb_checked(0, 0, 1, hash32, hash32, 0, 0)
 	       == CRYPTO_ERR_NULL);
+	ASSERT(crypto_random(0, 0) == CRYPTO_OK);
+	ASSERT(crypto_random(0, 1) == CRYPTO_ERR_NULL);
+	ASSERT(crypto_random(hash32, 1) == CRYPTO_OK);
 
 	u8 a16[16] = {0};
 	u8 b16[16] = {0};

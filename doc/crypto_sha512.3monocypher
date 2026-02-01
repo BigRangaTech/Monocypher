@@ -427,7 +427,7 @@ Computing a message authentication code all at once:
 uint8_t hash   [64];                /* Output hash             */
 uint8_t key    [32];                /* Key                     */
 uint8_t message[10] = "Lorem ipsu"; /* Message to authenticate */
-arc4random_buf(key, 32);
+crypto_random(key, 32);
 crypto_sha512_hmac(hash, key, 32, message, 10);
 /* Wipe secrets if they are no longer needed */
 crypto_wipe(message, 10);
@@ -440,7 +440,7 @@ uint8_t hash   [64];        /* Output hash             */
 uint8_t key    [32];        /* Key                     */
 uint8_t message[500] = {1}; /* Message to authenticate */
 crypto_sha512_hmac_ctx ctx;
-arc4random_buf(key, 32);
+crypto_random(key, 32);
 crypto_sha512_hmac_init(&ctx, key, 32);
 /* Wipe the key */
 crypto_wipe(key, 32);
@@ -458,7 +458,7 @@ uint8_t okm[128];                 /* Output random keys */
 uint8_t ikm [96];                 /* Input key material */
 uint8_t salt[16];                 /* Random salt        */
 uint8_t info[11] = "Lorem ipsum"; /* Domain separation  */
-arc4random_buf(salt, sizeof(salt));
+crypto_random(salt, sizeof(salt));
 crypto_sha512_hkdf(okm, sizeof(okm),
                    ikm, sizeof(ikm),
                    salt, sizeof(salt),
@@ -479,7 +479,7 @@ uint8_t skab[32];            /* Alice & bob shared secret */
 uint8_t ikm [96];            /* Input key material        */
 uint8_t salt[16];            /* Random salt               */
 uint8_t info[ 6] = "X25519"; /* Domain separation         */
-arc4random_buf(salt, sizeof(salt));
+crypto_random(salt, sizeof(salt));
 
 /* Extract */
 uint8_t prk[64];             /* pseudo-random key         */

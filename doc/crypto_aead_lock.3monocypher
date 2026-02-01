@@ -304,10 +304,10 @@ attacker's interference.
 does not need to be wiped if the decryption fails.
 .Sh EXAMPLES
 The following examples assume the existence of
-.Fn arc4random_buf ,
+.Fn crypto_random ,
 which fills the given buffer with cryptographically secure random bytes.
 If
-.Fn arc4random_buf
+.Fn crypto_random
 does not exist on your system, see
 .Xr intro 3monocypher
 for advice about how to generate cryptographically secure random bytes.
@@ -319,8 +319,8 @@ uint8_t nonce      [24];    /* Use only once per key       */
 uint8_t plain_text [12] = "Lorem ipsum"; /* Secret message */
 uint8_t mac        [16];    /* Message authentication code */
 uint8_t cipher_text[12];              /* Encrypted message */
-arc4random_buf(key,   32);
-arc4random_buf(nonce, 24);
+crypto_random(key,   32);
+crypto_random(nonce, 24);
 crypto_aead_lock(cipher_text, mac,
                  key, nonce,
                  NULL, 0,
@@ -363,8 +363,8 @@ uint8_t key  [32];    /* Random, secret session key  */
 uint8_t nonce[24];    /* Use only once per key       */
 uint8_t text [12] = "Lorem ipsum"; /* Secret message */
 uint8_t mac  [16];    /* Message authentication code */
-arc4random_buf(key,   32);
-arc4random_buf(nonce, 24);
+crypto_random(key,   32);
+crypto_random(nonce, 24);
 crypto_aead_lock(text, mac,
                  key, nonce,
                  NULL, 0,
@@ -405,8 +405,8 @@ uint8_t nonce      [24];    /* Use only once per key       */
 uint8_t plain_text [12] = "Lorem ipsum"; /* Secret message */
 uint8_t mac        [16];    /* Message authentication code */
 uint8_t cipher_text[12];              /* Encrypted message */
-arc4random_buf(key,   32);
-arc4random_buf(nonce, 24);
+crypto_random(key,   32);
+crypto_random(nonce, 24);
 crypto_aead_ctx ctx;
 crypto_aead_init_x(&ctx, key, nonce);
 crypto_aead_write(&ctx, cipher_text, mac,

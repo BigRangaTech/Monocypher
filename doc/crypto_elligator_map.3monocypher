@@ -220,9 +220,9 @@ instead of its fast variant:
 uint8_t sk  [32]; /* Secret key output        */
 uint8_t pk  [32]; /* Hidden public key output */
 uint8_t tweak;    /* Random tweak input       */
-arc4random_buf(&tweak, 1);
+crypto_random(&tweak, 1);
 for (;;) {
-    arc4random_buf(sk, 32);
+    crypto_random(sk, 32);
     crypto_x25519_dirty_small(pk, sk);
     if (crypto_elligator_rev(pk, pk, tweak) == 0)
         break;
